@@ -226,89 +226,103 @@ N+1 — минимум под нагрузку плюс один запасно�
 
 ## 5. Логическая схема БД
 
-Схема — без привязки к конкретной СУБД и без шардинга.
+Схема — без привязки к конкретной СУБД и без шардинга. По правилам лекции (денормализация, без JOIN, шард по PK): Track хранит имя исполнителя/альбома/обложку денормализованно (быстрое чтение без похода в Artist/Album), но Artist и Album все равно существуют как отдельные сущности — это authoritative источник данных (в т.ч. фото, которое незачем дублировать в каждом треке этого исполнителя), а artist_id/album_id в Track — это просто индекс для группировки ("все треки исполнителя"), не JOIN. Вектор эмбеддинга вынесен в отдельную TRACK_EMBEDDING: его не читает обычный поиск/показ трека (не нужно таскать 2 КБ лишних данных при каждом из 6056 чтений Track в пике), нужен только batch-пересчету рекомендаций, и меняется по своему графику (переобучение модели), не связанному с изменением метаданных трека. Аудиофайлы — не отдельная сущность схемы: сами байты лежат в объектном хранилище (Ceph), а их метаданные (битрейт/размер/статус) — это 3 маленьких элемента списка прямо в Track, отдельная таблица тут не дает прироста. Playlist и ListeningHistory денормализованы так же, как Recommendation: список треков/событий хранится прямо внутри записи, без отдельной связной таблицы и без повторения user_id в каждой строке.
+
 ```mermaid
 erDiagram
+    ARTIST ||--o{ TRACK : performs
+    ALBUM ||--o{ TRACK : contains
+    ARTIST ||--o{ ALBUM : releases
+    TRACK ||--|| TRACK_EMBEDDING : has
     USER ||--o{ LIKE : likes
     TRACK ||--o{ LIKE : "liked by"
     USER ||--o{ PLAYLIST : owns
-    PLAYLIST ||--o{ PLAYLIST_TRACK : contains
-    TRACK ||--o{ PLAYLIST_TRACK : "in playlist"
     USER ||--|| RECOMMENDATION : has
-    USER ||--o{ LISTENING_HISTORY : has
-    TRACK ||--o{ LISTENING_HISTORY : "played in"
+    USER ||--|| LISTENING_HISTORY : has
     USER ||--o{ LISTENING_EVENT : generates
-    TRACK ||--o{ AUDIO_FILE : "has files"
 
     USER {
-        string user_id PK
+        uuid user_id PK
         string email
         string password_hash
         string subscription_status
     }
-    TRACK {
-        string track_id PK
+    ARTIST {
+        uuid artist_id PK
+        string name
+        string photo_url
+    }
+    ALBUM {
+        uuid album_id PK
+        uuid artist_id FK
         string title
-        string artist_id "индекс, без JOIN - группировка по исполнителю"
+        string cover_url
+    }
+    TRACK {
+        uuid track_id PK
+        string title
+        uuid artist_id "индекс, без JOIN"
         string artist_name "денормализовано"
-        string album_id "индекс, группировка по альбому"
+        uuid album_id "индекс"
         string album_name "денормализовано"
         string genre
         int duration_sec
-        vector embedding
+        string cover_url "денормализовано из Album"
+        list audio_files "[{bitrate, size_bytes, status}] x3, метаданные, не сами байты"
     }
-    AUDIO_FILE {
-        string track_id FK
-        string bitrate
-        string object_key
+    TRACK_EMBEDDING {
+        uuid track_id PK
+        vector embedding
+        datetime updated_at
     }
     LIKE {
-        string user_id FK
-        string track_id FK
+        uuid user_id FK
+        uuid track_id FK
         datetime created_at
     }
     PLAYLIST {
-        string playlist_id PK
-        string user_id FK
+        uuid playlist_id PK
+        uuid user_id FK
         string name
-    }
-    PLAYLIST_TRACK {
-        string playlist_id FK
-        string track_id FK
-        int position
+        string cover_url
+        list track_ids "денормализовано, без JOIN к PlaylistTrack"
     }
     RECOMMENDATION {
-        string user_id PK
+        uuid user_id PK
         list track_ids
         datetime computed_at
     }
     LISTENING_HISTORY {
-        string user_id FK
-        string track_id FK
-        datetime played_at
+        uuid user_id PK
+        list events "[{track_id, played_at}], user_id не повторяется в записях"
     }
     LISTENING_EVENT {
-        string user_id FK
-        string track_id FK
+        uuid user_id FK
+        uuid track_id FK
         datetime ts
         int duration_listened
+        int percent_listened "0-100, сигнал для рекомендаций: дослушал/пропустил"
+        string source "search/recommendation/playlist - источник прослушивания"
     }
 ```
 
 |Таблица | Объем | Чтение QPS (ср/пик) | Запись QPS (ср/пик) | Консистентность | Ключ, распределение|
 |:--|:--|:--|:--|:--|:--|
 |User| 30,5 млн / ~30 ГБ| 179 / 448 (авторизация)| редко (регистрация)| строгая| user_id, равномерно|
-|Track| 85 млн / ~0,4 ТБ| 2422 / 6056 (поиск+старт)| ~0,13 (пополнение каталога)| eventual (с реплик)| track_id, **сильный перекос** — хиты|
-|AudioFile (объектное хранилище, S3-совместимое, например Ceph RGW; ключ: {track_id}/{битрейт}, не БД)| 255 млн (85М x 3 битрейта) / ~1224 ТБ| 215 / 538 (только промахи CDN-кэша, раздел 3)| ~0,4| eventual, write-once, репликация x3 на уровне хранилища| track_id+битрейт, перекос — сглажен CDN-кэшем|
+|Artist| ~5,7 млн / ~2,3 ГБ| редко, при показе и пополнении каталога| ~0,01 (новые исполнители)| eventual| artist_id, перекос у популярных|
+|Album| ~8,5 млн / ~3,4 ГБ| редко, при показе и пополнении каталога| ~0,01 (новые альбомы)| eventual| album_id, перекос у популярных|
+|Track| 85 млн / ~0,15 ТБ| 2422 / 6056 (поиск+старт)| ~0,13 (пополнение каталога)| eventual (с реплик)| track_id, **сильный перекос** — хиты|
+|TrackEmbedding| 85 млн / ~0,18 ТБ| batch (пересчет рекомендаций)| ~0,13 + периодический батч-пересчет (переобучение модели)| eventual| track_id, равномерно (батч проходит по всем)|
+|Аудио-байты (объектное хранилище, Ceph; НЕ отдельная сущность схемы — метаданные встроены в Track.audio_files)| 255 млн файлов / ~1224 ТБ| 215 / 538 (только промахи CDN-кэша, раздел 3)| ~0,4 (x3 битрейта)| eventual, write-once, репликация x3 на уровне хранилища| track_id+битрейт, перекос — сглажен CDN-кэшем|
 |Like| ~7,6 млрд / ~61 ГБ| в составе RPS плейлистов: 179 / 448| то же| строгая| user_id, равномерно|
-|Playlist + PlaylistTrack| — / ~61 ГБ| 179 / 448| то же| строгая| user_id (владелец), равномерно|
+|Playlist (track_ids встроены, без отдельной PlaylistTrack)| ~305 млн / ~61 ГБ| 179 / 448| то же| строгая| user_id (владелец), равномерно|
 |Recommendation (precomputed)| 30,5 млн / ~73 ГБ| 538 / 1345| офлайн batch, не онлайн-RPS| eventual (снимок)| user_id, равномерно|
-|ListeningHistory (компактная, для "итогов года")| 30,5 млн / ~4,4 ТБ| редко, не моделируем| = воспроизведения: 2153 / 5383| eventual| user_id, равномерно|
-|ListeningEvent (сырой лог для ML)| ~6,8x10^10/год / ~13,6 ТБ/год| batch (обучение модели)| = воспроизведения: 2153 / 5383| eventual| round-robin/hash|
+|ListeningHistory (events встроены, PK=user_id, без повтора в записях)| 30,5 млн / ~4,4 ТБ| редко, не моделируем| = воспроизведения: 2153 / 5383| eventual| user_id, равномерно|
+|ListeningEvent (+percent_listened, +source для более точных рекомендаций)| ~6,8x10^10/год / ~13,6 ТБ/год| batch (обучение модели)| = воспроизведения: 2153 / 5383| eventual| round-robin/hash|
 
-**Данных достаточно для API MVP**: авторизация -> User; воспроизведение -> Track + AudioFile; поиск -> Track (индекс по title/artist_name); плейлисты -> Playlist/PlaylistTrack/Like; рекомендации -> Recommendation (читается онлайн) + ListeningEvent (обучающие данные для их пересчета офлайн).
+**Данных достаточно для API MVP**: авторизация -> User; воспроизведение -> Track (+ метаданные audio_files) + аудио-байты (Ceph); поиск -> Track (индекс по title/artist_name); плейлисты -> Playlist (track_ids) + Like; рекомендации -> Recommendation (читается онлайн, строится из TrackEmbedding + ListeningEvent офлайн); обложки/фото -> Artist.photo_url, Album.cover_url, Track.cover_url, Playlist.cover_url.
 
-**Распределение нагрузки по ключам**: таблицы с ключом user_id нагружены равномерно (нет пользователя, который создает заметную долю трафика). Track/AudioFile с ключом track_id — наоборот, сильно скошены: малая доля треков (хиты) дает большую часть чтений (раздел 3), поэтому их масштабируют кешированием (CDN, раздел 3), а не шардингом. ListeningEvent пишется с той же скоростью, что и воспроизведения (до 5383 зап/с пик) — обычная таблица с одним потоком репликации с таким темпом записи не справится, поэтому события сначала пишутся в очередь (Kafka), а уже из нее асинхронно вычитываются в хранилище для обучения модели.
+**Распределение нагрузки по ключам**: таблицы с ключом user_id нагружены равномерно (нет пользователя, который создает заметную долю трафика) — физический потолок на то, сколько может прослушать один человек. Track/TrackEmbedding/Artist/Album/аудио-байты с ключом track_id/artist_id/album_id — наоборот, сильно скошены: малая доля (хиты) дает большую часть чтений (раздел 3), поэтому их масштабируют кешированием (CDN, раздел 3), а не шардингом. ListeningEvent пишется с той же скоростью, что и воспроизведения (до 5383 зап/с пик). Если бы это была обычная реляционная таблица с типичной репликацией в один поток (как у MySQL) — она бы не справилась с таким темпом записи (тот же сценарий "БД съедается записью", LiveJournal, лекция 5). Поэтому события сначала пишутся в очередь (Kafka, партиционированную без привязки к user_id — чтобы не было горячей партиции), а уже из нее асинхронно, пакетами, вычитываются в хранилище для обучения модели.
 
 ## Список источников
 
