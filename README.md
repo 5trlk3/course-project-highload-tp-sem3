@@ -536,7 +536,11 @@ CDC доставляет изменения реакций в Kafka. Обраб�
 
 ### 7.1. Генерация рекомендаций и очереди
 
-**Офлайн:** события и состояния реакций -> модель -> TrackEmbedding/HNSW -> снимки кандидатов в Redis. Накопленный listened_ms из heartbeat повторно не суммируется.
+**Офлайн, периодически:**
+
+1. Собрать признаки из DWH и снимков лайков/подписок; накопленный listened_ms из heartbeat повторно не суммировать.
+2. Обучить коллаборативную модель, сохранить TrackEmbedding и построить HNSW.
+3. По векторам пользователей получить top-200 UserTrackCandidate, по векторам треков — top-50 TrackNeighborCandidates. Передать готовую model_version в Recommendations API для публикации в Redis.
 
 |Контекст | Источник следующей порции|
 |:--|:--|
@@ -546,7 +550,14 @@ CDC доставляет изменения реакций в Kafka. Обраб�
 |GENRE / TRENDING| каталог с фильтром жанра и popularity_score|
 |SIMILAR| соседи seed-трека, затем fallback|
 
-**Онлайн:** фильтрация доступности/повторов, ранжирование и разнообразие исполнителей. Выдача по 20 треков, очередь до 200; cursor продвигается атомарно. Повтор cursor возвращает ту же страницу. Статичный плейлист сохраняет порядок.
+**Онлайн, при пополнении ленты/SIMILAR:**
+
+1. Объединить кандидатов из таблицы выше с соседями последних положительных действий пользователя; отфильтровать недоступные треки, повторы и неподходящий жанр.
+2. Пересчитать score = α·base_score + β·recent_affinity + γ·is_followed_artist. Сигналы нормализованы в [0,1], веса подбираются на отложенных данных; recent_affinity — близость по снимкам соседей до пяти последних прослушанных/лайкнутых треков.
+3. Отсортировать по score и жадно выбрать до 20 треков, не допуская более двух подряд от одного артиста. При нехватке — популярное в заданном жанре, затем конец выдачи.
+4. Атомарно сохранить страницу и cursor в очереди до 200 элементов; повтор cursor возвращает ту же страницу. Свежие действия влияют на следующую порцию без ожидания batch-пересчёта.
+
+Для TRACK и STATIC_PLAYLIST ранжирование не применяется: сохраняется выбранный трек или порядок PlaylistItem.
 
 Модель/источник закреплены в PlaybackContext. При смене revision контекст обновляется; при нехватке кандидатов — fallback или конец выдачи.
 
@@ -598,80 +609,101 @@ CDC доставляет изменения реакций в Kafka. Обраб�
 
 ## 10. Схема проекта
 
+Service layer + API-composition (лекция 9, слайды 14–20). Хранилища закреплены за доменами; чужие данные доступны через API владельца или события.
+
 ```mermaid
 flowchart TB
     Client(["Клиент"])
-    GeoDNS["GeoDNS<br/>выбор core ДЦ"]
-    Anycast["Anycast/BGP<br/>CDN-площадка"]
-    Client -.->|"DNS для API"| GeoDNS
-    GeoDNS -.->|"IP выбранного ДЦ"| Client
-    Client -->|"API и события плеера"| Entry
-    Client -->|"аудио / изображения"| Anycast
+    Front["API Gateway / Composition"]
+    CDN["CDN / LFU-кэш"]
+    Events[("Kafka<br/>события + changelog")]
 
-    subgraph EDGE["CDN/edge"]
-        LVS["LVS/IPVS DR + keepalived"]
-        Cache["HTTP-кэш на NVMe<br/>LFU с окном"]
-        LVS --> Cache
-    end
-    Anycast --> LVS
-    Cache -->|"попадание"| Client
-    Cache -.->|"промах"| Ceph
-
-    subgraph DC["Core ДЦ ×3, N+1 по мощности"]
-        Entry["Входной Service<br/>kube-proxy/nftables"]
-        Ingress["NGINX Ingress Controller<br/>TLS, least_conn"]
-        Auth["Auth/Users"]
-        Catalog["Catalog & Search"]
-        Streaming["Streaming / Activity ingestion"]
-        Recs["Recommendations / Queue generator"]
-        Playlists["Playlists & Reactions"]
-        Projector["Kafka Streams<br/>сессии, история, счётчики"]
-        Indexer["Обновление поисковой проекции"]
-        Entry --> Ingress
-        Ingress --> Auth
-        Ingress --> Catalog
-        Ingress --> Streaming
-        Ingress --> Recs
-        Ingress --> Playlists
+    subgraph USERS["Домен: аккаунты"]
+        UserApi["Auth / Users API"]
+        UserDB[("PostgreSQL<br/>User")]
+        UserApi --> UserDB
     end
 
-    PG[("PostgreSQL<br/>User, Playlist/Item, FeedDefinition")]
-    Mongo[("MongoDB<br/>каталог, MediaAsset, AudioVariant")]
-    Search[("OpenSearch<br/>TrackSearchDocument")]
-    Cassandra[("Cassandra<br/>Like/Follow, Session, ActivityHistory")]
-    CDC["CDC-потребитель<br/>версии и доставка изменений"]
-    Redis[("Redis Cluster<br/>кандидаты, контексты/очереди, счётчики")]
-    Kafka[("Kafka<br/>UserActivityEvent + changelog")]
-    CH[("ClickHouse<br/>DWH, CounterSnapshot, TrackEmbedding")]
-    Batch["Batch-задача<br/>модель + ANN"]
-    Ceph[("Ceph RGW<br/>аудио и изображения")]
+    subgraph CATALOG["Домен: каталог, поиск и медиа"]
+        CatalogApi["Catalog / Search API<br/>обновление индекса"]
+        CatalogDB[("MongoDB<br/>ArtistProfile, Album, Track<br/>MediaAsset, AudioVariant")]
+        SearchDB[("OpenSearch<br/>TrackSearchDocument")]
+        MediaStore[("Ceph RGW<br/>аудио / изображения")]
+        CatalogApi --> CatalogDB
+        CatalogApi --> SearchDB
+        CatalogApi -->|"object_key / загрузка"| MediaStore
+    end
 
-    Auth --> PG
-    Playlists --> PG
-    Playlists -->|"личные состояния"| Cassandra
-    Catalog --> Mongo
-    Catalog --> Search
-    Catalog -->|"числа на карточках"| Redis
-    Streaming -->|"start / heartbeat / finish"| Kafka
-    Streaming -->|"метаданные воспроизведения"| Mongo
-    Streaming -->|"последнее состояние сессии"| Cassandra
-    Recs -->|"рецепты / статичные подборки"| PG
-    Recs -->|"кандидаты / очередь"| Redis
-    Cassandra -->|"изменения Like/Follow"| CDC
-    CDC --> Kafka
-    Kafka --> Projector
-    Projector -->|"Session / History"| Cassandra
-    Projector -->|"версионированные счётчики"| Redis
-    Projector -->|"снимки показателей"| CH
-    Kafka -->|"пакетный архив"| CH
-    Mongo --> Indexer
-    Redis -->|"популярность"| Indexer
-    Indexer --> Search
-    CH --> Batch
-    Batch -->|"снимки кандидатов"| Redis
-    Batch -->|"версия эмбеддингов"| CH
-    Mongo -.->|"object_key"| Ceph
+    subgraph PLAYLISTS["Домен: статичные подборки"]
+        PlaylistApi["Playlists API"]
+        PlaylistDB[("PostgreSQL<br/>Playlist, PlaylistItem")]
+        PlaylistApi --> PlaylistDB
+    end
+
+    subgraph REACTIONS["Домен: реакции и счётчики"]
+        ReactionApi["Reactions / Counters API<br/>CDC + потоковая обработка"]
+        ReactionDB[("Cassandra<br/>UserTrackLike<br/>UserArtistFollow")]
+        CounterDB[("Redis Cluster<br/>TrackCounters<br/>ArtistCounters")]
+        ReactionApi -->|"текущее состояние"| ReactionDB
+        ReactionApi -->|"агрегаты"| CounterDB
+    end
+
+    subgraph PLAYBACK["Домен: воспроизведение и история"]
+        PlaybackApi["Streaming / History API<br/>потребитель playback-событий"]
+        PlaybackDB[("Cassandra<br/>PlaybackSession<br/>UserActivityHistory")]
+        PlaybackApi --> PlaybackDB
+    end
+
+    subgraph RECOMMENDATIONS["Домен: рекомендации и очередь"]
+        RecommendationApi["Recommendations API<br/>онлайн-генератор очереди"]
+        RecipeDB[("PostgreSQL<br/>FeedDefinition")]
+        QueueDB[("Redis Cluster<br/>UserTrackCandidate<br/>TrackNeighborCandidates<br/>PlaybackContext, PlaybackQueueItem")]
+        RecommendationApi --> RecipeDB
+        RecommendationApi --> QueueDB
+    end
+
+    subgraph ANALYTICS["Домен: аналитика и ML"]
+        AnalyticsApi["DWH ingestion / Batch ML<br/>обучение + HNSW"]
+        AnalyticsDB[("ClickHouse<br/>UserActivityEvent<br/>CounterSnapshot, TrackEmbedding")]
+        AnalyticsApi --> AnalyticsDB
+    end
+
+    Client -->|"API"| Front
+    Client -->|"медиа"| CDN
+    CDN -->|"промах кэша"| MediaStore
+
+    Front --> UserApi
+    Front --> CatalogApi
+    Front --> PlaylistApi
+    Front --> ReactionApi
+    Front --> PlaybackApi
+    Front --> RecommendationApi
+
+    CatalogApi -->|"аккаунт артиста"| UserApi
+    PlaybackApi -->|"аудиоверсия / доступность"| CatalogApi
+    RecommendationApi -->|"метаданные / жанр / популярное"| CatalogApi
+    RecommendationApi -->|"статичная подборка"| PlaylistApi
+    RecommendationApi -->|"свежая история"| PlaybackApi
+    RecommendationApi -->|"лайки / подписки"| ReactionApi
+
+    CatalogApi -.->|"изменения каталога"| Events
+    Events -.->|"каталог / популярность: индекс"| CatalogApi
+    ReactionApi -.->|"CDC реакций / CounterUpdated"| Events
+    Events -.->|"реакции / прослушивания: счётчики"| ReactionApi
+    PlaybackApi -.->|"start / heartbeat / finish"| Events
+    Events -.->|"playback: сессии и история"| PlaybackApi
+    Events -.->|"события и снимки счётчиков"| AnalyticsApi
+    AnalyticsApi -->|"публикация версии кандидатов"| RecommendationApi
+
+    classDef service fill:#deebff,stroke:#527bbd
+    classDef database fill:#fff0cf,stroke:#c58a25
+    classDef entry fill:#e2efd5,stroke:#729857
+    class UserApi,CatalogApi,PlaylistApi,ReactionApi,PlaybackApi,RecommendationApi,AnalyticsApi service
+    class UserDB,CatalogDB,SearchDB,MediaStore,PlaylistDB,ReactionDB,CounterDB,PlaybackDB,RecipeDB,QueueDB,AnalyticsDB,Events database
+    class Front,CDN entry
 ```
+
+Сплошные стрелки — API/операции с хранилищем, пунктир — события. API-composition объединяет каталог, личные реакции и счётчики для выдачи карточек. Блоки БД — логические области кластеров из раздела 6; сервисы и БД развёрнуты отдельно.
 
 
 [^1]: [Аудитория «Яндекс Музыки» превысила 30,5 млн человек в месяц](https://www.sostav.ru/publication/auditoriya-yandeks-muzyki-prevysila-30-5-mln-chelovek-v-mesyats-79308.html)
