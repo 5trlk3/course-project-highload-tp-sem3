@@ -14,7 +14,7 @@
 
 **Ключевые продуктовые решения**: 
 1) Поиск сразу по исполнителю и названию;
-2) Рекомендательная система предварительно вычисляет наиболее вероятный список треков для пользователя.
+2) Рекомендательная система объединяет кандидатов нескольких движков по запросу; результаты движков кратковременно кэшируются.
 
 **Ключевые функции, характеризующие сервис**: 
 1) Прослушивание музыки;
@@ -46,11 +46,11 @@
 |Запрос рекомендаций| ~ 3|
 |Поисковый запрос| ~ 1,5|
 |Действие с плейлистом или реакция (лайк/подписка)| ~ 1 суммарно|
-|Авторизация / обновление сессии| ~ 1|
+|Авторизация / обновление сессии| ~ 3|
 
 Расчет количества прослушанных треков: по данным исследования РОМИР, 78% пользователей музыкальных стримингов в городах России проводят с сервисом более 30 минут в день [^3]. Поскольку это пороговое, а не среднее значение, для расчета берется оценка среднего времени прослушивания 40 минут в день на DAU-пользователя. Средняя длительность трека, по данным исследования, в 2020 году (данные Spotify) составила 3 минуты 17 секунд ~ 3,3 минуты [^4]. Тогда среднее число прослушанных треков в день: 40 / 3,3 ~ 12.
 
-Частота обращений к поиску, рекомендациям, плейлистам и авторизации не публикуется сервисами в открытых источниках, поэтому эти величины приняты как оценки.
+Частота обращений к поиску, рекомендациям, плейлистам и авторизации принята как оценка. Три обращения к Auth в день учитывают вход/обновление при JWT на 15 минут и ~40 минутах прослушивания; чтение профиля входит в состав прикладных запросов.
 
 ### Технические метрики
 
@@ -60,25 +60,25 @@
 
 Для адаптивного воспроизведения сервис хранит несколько версий трека под разный битрейт — режимы «Экономичное» (HE-AAC, 64 кбит/с), «Оптимальное» (AAC, 192 кбит/с) и «Превосходное» (MP3 320 кбит/с либо FLAC) [^7]. Для расчета примем упрощенно 3 сохраняемые версии на трек: 64 / 192 / 320 кбит/с. При средней длительности трека 3,3 минуты (200 сек) [^4] размер файла на каждый битрейт: 64 кбит/с -> 1,6 МБ; 192 кбит/с -> 4,8 МБ; 320 кбит/с -> 8,0 МБ; итого ~ 14,4 МБ на трек (все версии).
 
-Бюджет метаданных каталога и эмбеддингов — ~0,5 ТБ: ~2 КБ на Track, ~2 КБ на вектор и связанные сущности. Для ~14,2 млн изображений по 0,3 МБ требуется ~4,3 ТБ; дополнительные размеры и пользовательские загрузки оцениваются отдельно.
+Бюджет метаданных каталога — ~0,33 ТБ: Track и связанные сущности. Артефакты движков рекомендаций учитываются отдельно. Для ~14,2 млн изображений по 0,3 МБ требуется ~4,3 ТБ; дополнительные размеры и пользовательские загрузки оцениваются отдельно.
 
 |Тип данных | Количество единиц | Размер на единицу | Итого|
 |:--|:--|:--|:--|
 |Аудиофайлы каталога (3 версии битрейта на трек)| 85 млн треков| 14,4 МБ| ~ 1224 ТБ (1,2 ПБ)|
-|Метаданные каталога, медиассылки и эмбеддинги| 85 млн треков и связанные сущности| по разделу 5| ~0,5 ТБ|
-|Оперативные пользовательские данные (состояния, элементы плейлистов, история 7 суток, очереди с TTL)| по разделу 5| бюджет с запасом на вспомогательные поля| ~4,6 ТБ до индексов и репликации|
-|UserTrackCandidate (top-200 на пользователя)| 30,5 млн| ~4 КБ| ~0,122 ТБ на версию|
-|TrackNeighborCandidates (top-50 на трек)| 85 млн| ~1 КБ| ~0,085 ТБ на версию|
+|Метаданные каталога и медиассылки| 85 млн треков и связанные сущности| по разделу 5| ~0,33 ТБ|
+|Оперативные пользовательские данные (состояния, элементы плейлистов, история 7 суток, очереди с TTL)| по разделу 5| бюджет с запасом на вспомогательные поля| ~4,8 ТБ до индексов и репликации|
+|EngineResultCache (top-100 на движок)| до 4 движков, TTL 5 минут| компактные списки| бюджет ~0,01 ТБ|
+|Артефакты RecommendationModel| BPR, co-listen, CONTENT/HNSW, популярное| две версии, Ceph| бюджет до 2 ТБ|
 |Изображения| ~14,2 млн| ~0,3 МБ| ~4,3 ТБ|
-|**Базовый бюджет полезных данных**| | | ~1234 ТБ; без поискового индекса, DWH, снимков счётчиков, индексов СУБД и репликации|
+|**Базовый бюджет полезных данных**| | | ~1236 ТБ; без DWH, поискового индекса, временных датасетов, индексов СУБД и репликации|
 
 
 |Тип метрики | Величина|
 |:--|:--|
-|Оперативные данные в пересчёте на MAU|~0,15 МБ, усреднённый бюджет|
+|Оперативные данные в пересчёте на MAU|~0,16 МБ, усреднённый бюджет|
 |Хранилище на 1 пользователя, оффлайн-кэш|0.25 Гб|
 
-~0,15 МБ на MAU — бюджет состояний, элементов плейлистов, истории за 7 суток и очередей с TTL (раздел 5). DWH добавляет ~108,6 ТБ/год до сжатия и репликации. Офлайн-кэш 0,25 ГБ хранится на устройстве и в серверный бюджет не входит.
+~0,16 МБ на MAU — бюджет состояний, элементов плейлистов, истории за 7 суток и очередей с TTL (раздел 5). DWH добавляет ~108,6 ТБ/год до сжатия и репликации. Офлайн-кэш 0,25 ГБ хранится на устройстве и в серверный бюджет не входит.
 
 **RPS в разбивке по типам запросов**
 
@@ -86,13 +86,15 @@
 
 |Тип запроса | Средний RPS | Пиковый RPS|
 |:--|:--|:--|
-|Воспроизведение трека| ~ 2153| ~ 5383|
+|Воспроизведение трека| ~ 2153| ~ 5382|
 |Запрос рекомендаций| ~ 538| ~ 1345|
 |Поиск| ~ 269| ~ 673|
 |Операции с плейлистом и реакции суммарно| ~ 179| ~ 448|
-|Авторизация| ~ 179| ~ 448|
-|Playback heartbeat + finish| ~15 069| ~37 681|
-|**Итого API**| ~18 387| ~45 978|
+|Авторизация| ~ 538| ~ 1345|
+|Playback heartbeat + finish| ~15 069| ~37 674|
+|**Итого API**| ~18 747| ~46 868|
+
+Итоги вычислены до округления строк. Playback API публикует STARTED при запросе воспроизведения; EventIngest принимает heartbeat/finish.
 
 **Сетевой трафик**
 
@@ -102,14 +104,14 @@
 
 Прослушивание распределено по суткам неравномерно (пики в утренние/вечерние часы). Примем коэффициент пик/среднее ~ 2,5 для сервисов с выраженной суточной цикличностью (аудитория сервиса сосредоточена в РФ). Пиковая нагрузка (аудио) ~ 82,7 \* 2,5 ~ 207 Гбит/с.
 
-Принятые payload: start ~2 КБ, рекомендации ~10 КБ, поиск ~5 КБ, прочие запросы ~1 КБ. Исходный API даёт ~228 Мбит/с и 0,984 ТБ/сутки; heartbeat/finish добавляют ~301 Мбит/с и 1,302 ТБ/сутки. Итого ~0,53 Гбит/с и 2,29 ТБ/сутки без полного учёта заголовков/повторов.
+Принятые payload: start ~2 КБ, рекомендации ~10 КБ, поиск ~5 КБ, прочие запросы ~1 КБ. API без heartbeat/finish даёт ~235 Мбит/с и 1,015 ТБ/сутки; heartbeat/finish добавляют ~301 Мбит/с и 1,302 ТБ/сутки. Итого ~0,54 Гбит/с и 2,32 ТБ/сутки без полного учёта заголовков/повторов.
 
 Для изображений принято 5 загрузок по 50 КБ на DAU в сутки: ~3,88 ТБ/сутки и ~0,9 Гбит/с в пике. Медиа идёт через CDN и в API RPS не входит.
 
 |Тип трафика | Пиковое потребление, Гбит/с | Суммарный суточный объем, ТБ/сутки|
 |:--|:--|:--|
 |Аудиопоток (стриминг)| ~ 207| ~ 893|
-|API, включая playback-телеметрию| ~0,53| ~2,29|
+|API, включая playback-телеметрию| ~0,54| ~2,32|
 |Изображения через CDN| ~0,9| ~3,88|
 |**Итого**| ~208,4| ~899,2|
 
@@ -121,14 +123,14 @@
 |DAU| 15,5 млн| +32% (~ +5,0 млн; ~ 14 тыс./сутки)|
 |Каталог| 85 млн треков| +4,9% (~ +4,16 млн; ~ 11,4 тыс./сутки)|
 |Аудиофайлы каталога| ~ 1224 ТБ| ~ +60 ТБ (~ 0,16 ТБ/сутки)|
-|Метаданные каталога и эмбеддинги| ~0,5 ТБ| ~+0,025 ТБ при росте каталога на 4,9%|
-|Пользовательские данные| ~ 4,6 ТБ| +32% (~ +1,5 ТБ; ~ 4 ГБ/сутки)|
-|UserTrackCandidate| ~0,122 ТБ| +32% (~+0,039 ТБ)|
-|**Базовое полезное хранилище**| ~1234 ТБ| ~+62 ТБ/год без DWH/индексов/реплик; рост изображений и соседей условно пропорционален каталогу|
+|Метаданные каталога| ~0,33 ТБ| ~+0,016 ТБ при росте каталога на 4,9%|
+|Пользовательские данные| ~ 4,8 ТБ| +32% (~ +1,54 ТБ; ~ 4,2 ГБ/сутки)|
+|Кэш движков / артефакты моделей| до 0,01 / 2 ТБ| кэш растёт с RPS, артефакты — с моделью/каталогом|
+|**Базовое полезное хранилище**| ~1236 ТБ| ~+62 ТБ/год без DWH/индексов/реплик; рост изображений и соседей условно пропорционален каталогу|
 |Пиковый сетевой трафик (аудио)| ~ 207 Гбит/с| +32% (~ +66 Гбит/с)|
 |Суточный объем трафика| ~899,2 ТБ/сутки| +32% (~+288 ТБ/сутки)|
-|Средний API RPS| ~18 387| +32% (~+5884)|
-|Пиковый API RPS| ~45 978| +32% (~+14 713)|
+|Средний API RPS| ~18 747| +32% (~+5999)|
+|Пиковый API RPS| ~46 868| +32% (~+14 998)|
 
 Прогноз: аудитория +32%/год [^1], каталог +4,16 млн треков (~4,9%). Пользовательские данные, RPS и трафик растут с аудиторией; аудиохранилище — примерно на 60 ТБ/год. Годовая скорость накопления playback-DWH вырастет со 108,6 до ~143,4 ТБ; индексы и служебные данные оцениваются отдельно.
 
@@ -138,14 +140,16 @@
 
 |Домен | Описание | Требования|
 |:--|:--|:--|
-|Auth/Users| профиль, сессии, подписки| консистентность записи|
-|Catalog & Search| каталог треков, поиск| read-heavy, кэшируется|
-|Recommendations| кандидаты, рецепты лент и генерация очереди| предвычисление + ограниченная онлайн-выдача|
-|Playlists & Reactions| статичные плейлисты, лайки треков, подписки на артистов| согласованные личные состояния и асинхронные общие счётчики|
-|Streaming| доставка аудиофайлов| доминирует по трафику|
-|Activity ingestion| start/heartbeat/finish и изменения реакций| поток событий для онлайн-проекций и DWH|
+|Auth| учётные данные, access/refresh, AuthSession| ротация и отзыв сессий|
+|Users| профиль и план пользователя| независим от сценария входа|
+|Catalog & Search| треки, артисты, медиа, поиск| CatalogIndexWorker обновляет индекс|
+|Recommendations| плейлисты, конфиги движков, merger/ranker| генерация по запросу, короткий engine cache|
+|Playback| аудиодоступ, история, context/queue| стабильные страницы очереди|
+|Reactions| личные лайки и подписки| согласованное состояние + CDC|
+|Event platform| приём событий, проекции счётчиков| Kafka, projector/aggregator workers|
+|Analytics| DWH, исторические снимки, датасеты| асинхронная загрузка и export Cron|
 
-Из раздела 2: пиковый аудиотрафик ~207 Гбит/с, изображения ~0,9 Гбит/с, API с heartbeat/finish ~0,53 Гбит/с. Основной объём байтов приходится на аудио, поэтому медиа раздаётся CDN, а прикладные запросы и приём событий обслуживаются core ДЦ.
+Из раздела 2: пиковый аудиотрафик ~207 Гбит/с, изображения ~0,9 Гбит/с, API с heartbeat/finish ~0,54 Гбит/с. Основной объём байтов приходится на аудио, поэтому медиа раздаётся CDN, а прикладные запросы и приём событий обслуживаются core ДЦ.
 
 **Обоснование расположения ДЦ**
 
@@ -155,7 +159,7 @@
 
 **Расчет распределения запросов по ДЦ**
 
-Три core ДЦ обслуживают ~18 387/45 978 среднего/пикового API RPS и ~0,53 Гбит/с. Штатно на ДЦ приходится ~6129/15 326 RPS; по N+1 каждый рассчитан на ~9194/22 989 при отказе одной площадки. Доступность хранилищ проверяется отдельно.
+Три core ДЦ обслуживают ~18 747/46 868 среднего/пикового API RPS и ~0,54 Гбит/с. Штатно на ДЦ приходится ~6249/15 623 RPS; по N+1 каждый рассчитан на ~9374/23 434 при отказе одной площадки. Доступность хранилищ проверяется отдельно.
 
 При допущении 90% попаданий по байтам CDN отдаёт ~186 Гбит/с, Ceph — ~21 Гбит/с. На core ДЦ приходится ~7 Гбит/с штатно и ~10,5 при отказе одного. Для изображений до измерения hit ratio резервируется дополнительно до 0,9 Гбит/с origin-трафика суммарно; API-полоса учитывается отдельно.
 
@@ -213,7 +217,7 @@ N+1 — минимум под нагрузку плюс один запасно�
 |IP Tunneling | идёт клиенту напрямую| только входящий трафик, но есть накладные расходы на инкапсуляцию/декапсуляцию на каждый пакет|
 |Direct Routing (DR, меняется MAC, не IP)| идёт клиенту напрямую| LB обрабатывает входящие пакеты, объёмный ответ обходит его|
 
-Берём DR: при 186 Гбит/с суммарного исходящего аудиотрафика важно, чтобы ответ обходил LB. Входящие пакеты всё равно требуют CPU и пропускной способности; пределы по PPS/CPS и сеть проверяются отдельно. Серверы и балансировщик каждой CDN-площадки размещаются в общей L2-сети. Для API в core ДЦ (~0,53 Гбит/с) используются правила Service kube-proxy/nftables, отдельный DR-балансировщик не нужен. Для выделенного LVS-балансировщика keepalived выполняет проверки и VRRP-переключение виртуального IP на резервный узел.
+Берём DR: при ~207,9 Гбит/с полного исходящего медиатрафика важно, чтобы ответ обходил LB. Входящие пакеты всё равно требуют CPU и пропускной способности; пределы по PPS/CPS и сеть проверяются отдельно. Серверы и балансировщик каждой CDN-площадки размещаются в общей L2-сети. Для API в core ДЦ (~0,54 Гбит/с) используются правила Service kube-proxy/nftables, отдельный DR-балансировщик не нужен. Для выделенного LVS-балансировщика keepalived выполняет проверки и VRRP-переключение виртуального IP на резервный узел.
 
 **Входящие запросы (L7)**: настраиваем least connections (least_conn), поскольку время обработки поисковых запросов различается. Число активных соединений — приближение занятости, а не точная загрузка сервера; преимущество перед round-robin проверяется на целевом профиле нагрузки. Разбор случайной маршрутизации [^12] иллюстрирует риск очередей, но сам по себе не доказывает превосходство алгоритма для нашего сервиса.
 
@@ -232,18 +236,22 @@ N+1 — минимум под нагрузку плюс один запасно�
 
 У API и медиа разные профили нагрузки. Для API, включая playback-телеметрию, проверяются обработка запросов и TLS; стоимость handshakes существенна при частом создании соединений. Медиа передаёт большой объём байтов по длительным соединениям, поэтому важна пропускная способность сети. При повторном использовании HTTPS-соединения новый handshake не требуется для каждого сегмента или heartbeat.
 
-*API-слой.* Ориентир бенчмарков [^16][^17] — ~10 000 новых HTTPS-соединений/с на узел. При 22 989 RPS на ДЦ и одном новом соединении на запрос: ceil(22 989 / 10 000) = 3 рабочих узла, с N+1 — 4 на ДЦ, 12 суммарно. Keep-alive/resumption [^18] снижают CPS; оценка проверяется на целевой конфигурации.
+*API-слой.* Ориентир бенчмарков [^16][^17] — ~10 000 новых HTTPS-соединений/с на узел. При 23 434 RPS на ДЦ и одном новом соединении на запрос: ceil(23 434 / 10 000) = 3 рабочих узла, с N+1 — 4 на ДЦ, 12 суммарно. Keep-alive/resumption [^18] снижают CPS; оценка проверяется на целевой конфигурации.
 
 *Edge/CDN-слой, ограничитель — пропускная способность сети.* CDN передаёт весь медиатрафик, включая промахи кэша: 207 Гбит/с аудио + 0,9 Гбит/с изображений. При целевой полезной полосе 10 Гбит/с на узел нужно ceil(207,9 / 10) = 21 рабочий сервер. Четыре точки присутствия — Москва, Петербург, Екатеринбург, Новосибирск; добавляем по одному резервному узлу на точку: 21 + 4 = 25 серверов (10/7/4/4). Балансировщики и внешние каналы считаются отдельно в разделе 11; 90% cache hit снижает origin-трафик, но не исходящий трафик CDN.
 
-*Вывод.* После добавления heartbeat/finish API-слой оценивается в 12 ingress-узлов, edge/CDN — около 23 узлов по аудиобайтовой нагрузке. Оба числа условны до нагрузочных испытаний и проверки распределения по площадкам; ~0,9 Гбит/с изображений требуют отдельной проверки кэша и origin, хотя при исходном суммарном округлении число рабочих edge-узлов остаётся 19.
+*Вывод.* API требует 12 Ingress-экземпляров на разных workers (раздел 11), CDN — 25 кэш-серверов. Числа проверяются испытаниями полного медиатрафика и распределения нагрузки по площадкам.
 
 ## 5. Логическая схема БД
 
-Онлайн-контур хранит состояния и проекции; DWH — архив UserActivityEvent для обучения и сверки.
+Auth хранит доступ и сессии, Users — профиль. Онлайн-состояния отделены от DWH DomainEvent. FK на схеме — логические ссылки между доменами, а не межбазовые ограничения.
 
 ```mermaid
 erDiagram
+    USER ||--o{ AUTH_IDENTITY : identifies
+    USER ||--o{ AUTH_SESSION : authenticates
+    AUTH_IDENTITY ||--o{ AUTH_SESSION : opens
+    AUTH_SESSION ||--o{ PLAYBACK_SESSION : authorizes
     USER ||--o| ARTIST_PROFILE : has
     ARTIST_PROFILE ||--o{ TRACK : publishes
     ARTIST_PROFILE ||--o{ ALBUM : releases
@@ -261,34 +269,52 @@ erDiagram
     ARTIST_PROFILE ||--o{ USER_ARTIST_FOLLOW : followed_by
     TRACK ||--|| TRACK_COUNTERS : has
     ARTIST_PROFILE ||--|| ARTIST_COUNTERS : has
+    TRACK_COUNTERS o|--o{ COUNTER_SNAPSHOT : track_history
+    ARTIST_COUNTERS o|--o{ COUNTER_SNAPSHOT : artist_history
     USER ||--o{ PLAYBACK_SESSION : starts
     TRACK ||--o{ PLAYBACK_SESSION : played_in
     USER ||--o{ USER_ACTIVITY_HISTORY : reads
     PLAYBACK_SESSION o|--o{ USER_ACTIVITY_HISTORY : playback_actions
-    USER ||--o{ USER_ACTIVITY_EVENT : generates
-    PLAYBACK_SESSION o|--o{ USER_ACTIVITY_EVENT : playback_facts
-    USER_ACTIVITY_EVENT ||--o| USER_ACTIVITY_HISTORY : projected_to
+    USER o|--o{ DOMAIN_EVENT : actor
+    PLAYBACK_SESSION o|--o{ DOMAIN_EVENT : playback_facts
+    DOMAIN_EVENT ||--o| USER_ACTIVITY_HISTORY : projected_to
     USER ||--o{ PLAYLIST : authors
     MEDIA_ASSET o|--o{ PLAYLIST : cover
-    PLAYLIST ||--o{ PLAYLIST_ITEM : contains
+    PLAYLIST ||--o{ PLAYLIST_ITEM : embeds
     TRACK ||--o{ PLAYLIST_ITEM : appears_in
     USER ||--o{ PLAYBACK_CONTEXT : opens
     PLAYLIST o|--o{ PLAYBACK_CONTEXT : static_source
     FEED_DEFINITION o|--o{ PLAYBACK_CONTEXT : feed_source
-    TRACK o|--o{ PLAYBACK_CONTEXT : similar_seed
+    TRACK o|--o{ PLAYBACK_CONTEXT : seed
     PLAYBACK_CONTEXT ||--o{ PLAYBACK_QUEUE_ITEM : buffers
     TRACK ||--o{ PLAYBACK_QUEUE_ITEM : queued
     PLAYBACK_CONTEXT ||--o{ PLAYBACK_SESSION : played_as
-    USER ||--o{ USER_TRACK_CANDIDATE : candidates_for
-    TRACK ||--o{ TRACK_NEIGHBOR_CANDIDATES : similar_to
-    TRACK ||--o{ TRACK_EMBEDDING : represented_by
+    TRACK ||--o{ TRACK_CONTENT_EMBEDDING : content_vector
+    RECOMMENDATION_MODEL ||--o{ TRACK_CONTENT_EMBEDDING : content_version
+    RECOMMENDATION_MODEL o|--o{ ENGINE_RESULT_CACHE : caches_version
+    USER o|--o{ ENGINE_RESULT_CACHE : personalized
 
     USER {
         uuid user_id PK
-        string email UK
-        string password_hash
+        string display_name
         string subscription_status
         uuid avatar_media_id FK
+    }
+    AUTH_IDENTITY {
+        string identity_id PK "local:email или provider:subject"
+        uuid user_id FK
+        string password_hash "для local"
+        string status "PENDING или ACTIVE"
+    }
+    AUTH_SESSION {
+        uuid auth_session_id PK
+        uuid user_id FK
+        string identity_id FK
+        string refresh_token_hash
+        bigint version
+        string device_id
+        datetime expires_at
+        datetime revoked_at
     }
     ARTIST_PROFILE {
         uuid artist_user_id PK, FK
@@ -307,8 +333,8 @@ erDiagram
         uuid artist_user_id FK
         uuid album_id FK
         string title
-        string artist_name "копия для выдачи"
-        string album_name "копия для выдачи"
+        string artist_name
+        string album_name
         string genre
         int duration_sec
         uuid cover_media_id FK
@@ -327,17 +353,16 @@ erDiagram
     AUDIO_VARIANT {
         uuid track_id PK, FK
         int bitrate PK
-        uuid media_id FK, UK
+        uuid media_id FK
         string codec
         string status
     }
     TRACK_SEARCH_DOCUMENT {
         uuid track_id PK, FK
-        string title "анализируемый текст"
-        string artist_name "анализируемый текст"
+        string title
+        string artist_name
         string album_name
         string genre
-        uuid cover_media_id FK
         string availability_status
         float popularity_score
         bigint source_version
@@ -364,16 +389,15 @@ erDiagram
         bigint like_count
         bigint qualified_play_count
         bigint projection_version
-        datetime updated_at
     }
     ARTIST_COUNTERS {
         uuid artist_user_id PK, FK
         bigint follower_count
         bigint projection_version
-        datetime updated_at
     }
     PLAYBACK_SESSION {
         uuid session_id PK
+        uuid auth_session_id FK
         uuid user_id FK
         uuid track_id FK
         uuid context_id FK
@@ -395,11 +419,11 @@ erDiagram
         uuid artist_user_id FK
         json payload
     }
-    USER_ACTIVITY_EVENT {
+    DOMAIN_EVENT {
         uuid event_id PK
         string event_type
         string aggregate_key
-        uuid actor_user_id FK
+        uuid actor_user_id FK "nullable для системных событий"
         uuid session_id FK
         uuid track_id FK
         uuid artist_user_id FK
@@ -410,9 +434,10 @@ erDiagram
     }
     COUNTER_SNAPSHOT {
         string entity_type PK "TRACK или ARTIST"
-        uuid entity_id PK "ссылка определяется entity_type"
+        uuid entity_id PK
         date snapshot_date PK
         json counters
+        string watermark
         datetime computed_at
     }
     PLAYLIST {
@@ -432,20 +457,24 @@ erDiagram
     }
     FEED_DEFINITION {
         uuid feed_id PK
-        string strategy "PERSONALIZED/GENRE/TRENDING"
-        json parameters
+        string title
+        string source_type
+        json engines "движки, лимиты, веса"
+        json ranker "RRF или NONE"
+        json filters
         bigint version
     }
     PLAYBACK_CONTEXT {
         uuid context_id PK
         uuid user_id FK
         string context_type "TRACK/STATIC_PLAYLIST/FEED/SIMILAR"
-        uuid playlist_id FK "STATIC_PLAYLIST"
-        uuid feed_id FK "FEED"
-        uuid seed_track_id FK "TRACK/SIMILAR"
-        string model_version
+        uuid playlist_id FK
+        uuid feed_id FK
+        uuid seed_track_id FK
         bigint source_version
+        string source_cursor
         string cursor
+        list seen_track_ids "до 100, динамические ленты"
         datetime expires_at
     }
     PLAYBACK_QUEUE_ITEM {
@@ -454,112 +483,141 @@ erDiagram
         uuid track_id FK
         string reason
     }
-    USER_TRACK_CANDIDATE {
-        uuid user_id PK, FK
-        string model_version PK
-        list scored_candidates "ограниченный top-200"
-        datetime computed_at
+    RECOMMENDATION_MODEL {
+        uuid model_id PK
+        string engine_type "COLLAB/CONTENT/POPULAR"
+        string version
+        string weights_key
+        string auxiliary_key "co-listen или HNSW"
+        string status
+        datetime created_at
     }
-    TRACK_NEIGHBOR_CANDIDATES {
+    TRACK_CONTENT_EMBEDDING {
         uuid track_id PK, FK
-        string model_version PK
-        list scored_candidates "ограниченный top-50"
-        datetime computed_at
+        uuid model_id PK, FK
+        vector embedding "только контентные признаки"
     }
-    TRACK_EMBEDDING {
-        uuid track_id PK, FK
-        string model_version PK
-        vector embedding
-        datetime computed_at
+    ENGINE_RESULT_CACHE {
+        string cache_key PK
+        string engine_type
+        uuid user_id FK "nullable"
+        uuid model_id FK "nullable"
+        bigint config_version
+        list ranked_candidates "до 100, TTL 5 минут"
+        datetime expires_at
     }
 ```
 
-Прослушивание засчитывается один раз на session_id после min(30 секунд, длительность трека), без учёта перемотки.
+AuthSession связана с User по user_id и отличается от PlaybackSession. Access JWT — 15 минут, refresh-сессия — до 30 суток; ротация refresh по version, logout отзывает сессию. TTL очищает документы, но срок/отзыв проверяет Auth API; уже выданный JWT действует до истечения [^42].
+
+PlaylistItem физически вложены в Playlist.items: до 10 000 элементов; изменение массива и revision атомарно. Разрешены намеренные повторы трека. Очередь до 200 треков и её контекст принадлежат Playback, EngineResultCache — только восстанавливаемый кэш движков.
 
 ### 5.1. События и DWH
 
 |Тип события | Основные данные | Назначение|
 |:--|:--|:--|
-|PLAYBACK_STARTED| session_id, track_id, context_id, source| начало воспроизведения|
-|PLAYBACK_HEARTBEAT| session_id, sequence, position_ms, listened_ms| активность и продолжение|
-|PLAYBACK_FINISHED| session_id, listened_ms, percent_listened, reason| история и обучение|
-|TRACK_LIKE_CHANGED| user_id, track_id, is_liked, state_version| состояние и счётчик лайков|
-|ARTIST_FOLLOW_CHANGED| user_id, artist_user_id, is_following, state_version| подписка и число подписчиков|
+|PLAYBACK_STARTED| session_id, auth_session_id, track_id, context_id| начало воспроизведения|
+|PLAYBACK_HEARTBEAT / FINISHED| session_id, sequence, listened_ms, position_ms| прогресс / завершение|
+|TRACK_PLAY_COUNTED| event_id, session_id, track_id| один факт прослушивания после min(30 сек, длительность), без перемотки|
+|TRACK_LIKE_CHANGED / ARTIST_FOLLOW_CHANGED| user_id, объект, состояние, version| реакции|
+|COUNTER_UPDATED / COUNTER_SNAPSHOT| объект, абсолютные значения, version/watermark| онлайн-проекции и исторические снимки|
+|CATALOG_CHANGED / MODEL_READY| объект/модель, version| поиск / публикация артефактов|
+
+DomainEvent — общий конверт; бизнес-события архивируются в DWH. Контрольные события MODEL_READY не включены в оценку playback-архива.
 
 ### 5.2. Объёмы и нагрузка
 
-Оценки полезных данных приведены до индексов и репликации. Для состояния реакции и элемента плейлиста принято 80 байт.
+Полезные данные — до индексов и репликации; 80 байт на состояние реакции / элемент плейлиста.
 
 |Сущности | Основание | Объём|
 |:--|:--|:--|
-|User / ArtistProfile / Album| 30,5 млн слушателей; 5,7 млн артистов; 8,5 млн альбомов| ~30 / 2,3 / 3,4 ГБ; пересечение аккаунтов уточняется|
+|User / ArtistProfile / Album| 30,5 млн / 5,7 млн / 8,5 млн| ~30 / 2,3 / 3,4 ГБ|
+|AuthIdentity / AuthSession| 30,5 млн × 512 байт / до 2 сессий на MAU × 256 байт| ~15,6 / 15,6 ГБ|
 |Track| 85 млн × 2 КБ| ~0,17 ТБ|
 |MediaAsset / AudioVariant| 269,2 млн × 256 байт / 255 млн × 128 байт| ~68,9 / 32,6 ГБ|
-|Аудио / изображения| три аудиокачества; 14,2 млн изображений × 0,3 МБ| ~1224 / 4,3 ТБ|
-|TrackSearchDocument| до 85 млн документов| индекс измеряется после настройки анализаторов|
-|UserTrackLike| 250 лайков на MAU × 80 байт| ~0,61 ТБ плюс неактивные версии|
-|UserArtistFollow| 10 подписок на MAU × 80 байт| ~24,4 ГБ|
-|Playlist / PlaylistItem| 10 плейлистов на MAU, по 50 элементов| ~61 ГБ / 1,22 ТБ|
-|UserActivityHistory| playback-события × 7 суток × 200 байт| ~2,08 ТБ плюс реакции|
-|Контексты и очереди| до 2 на DAU, 200 элементов × 32 байта, TTL 24 часа| до ~0,2 ТБ плюс метаданные|
-|TrackCounters / ArtistCounters / CounterSnapshot| агрегаты и ежедневные снимки| зависит от числа шардов и срока хранения|
-|UserTrackCandidate / TrackNeighborCandidates| top-200 на MAU / top-50 на трек, 20 байт на кандидата| ~0,122 / 0,085 ТБ на версию|
-|TrackEmbedding| 85 млн × до 2 КБ, бюджет с запасом| до ~0,17 ТБ; ANN-память отдельно|
-|UserActivityEvent, DWH| 186 млн воспроизведений/сутки × 8 событий × 200 байт| ~108,6 ТБ/год плюс реакции|
+|Аудио / изображения| три аудиокачества / 14,2 млн изображений| ~1224 / 4,3 ТБ|
+|TrackSearchDocument| до 85 млн документов| проектный индекс до 1 ТБ|
+|UserTrackLike / UserArtistFollow| 250 лайков / 10 подписок на MAU| ~0,61 ТБ / 24,4 ГБ|
+|Playlist с items| 10 плейлистов на MAU, по 50 элементов| ~61 ГБ метаданных + 1,22 ТБ элементов|
+|UserActivityHistory| playback × 7 суток × 200 байт| ~2,08 ТБ плюс реакции|
+|PlaybackContext / QueueItem| до 2 на DAU, 200 × 32 байта + до 100 seen ID, TTL 24 часа| до ~0,25 ТБ плюс метаданные|
+|EngineResultCache| 1345 RPS × 300 сек × до 4 движков × 100 × 20 байт| до ~3,23 ГБ сырого payload; бюджет 10 ГБ|
+|RecommendationModel и артефакты| BPR-факторы, co-listen top-50, content-векторы/HNSW, популярное; две версии| бюджет до 2 ТБ в Ceph|
+|TrackContentEmbedding| 85 млн × 128 × 4 байта; внутри артефактов CONTENT| ~43,5 ГБ на версию; запас до 2 КБ/трек|
+|DomainEvent, DWH| 186 млн воспроизведений/сутки × 8 событий × 200 байт| ~108,6 ТБ/год плюс производные события и реакции|
+|TrackCounters / ArtistCounters / CounterSnapshot| агрегаты / ежедневные снимки| зависят от активности и срока хранения|
 
 ## 6. Физическая схема БД
 
-|Сущности | Хранилище | Ключи и организация | Надёжность|
-|:--|:--|:--|:--|
-|User| PostgreSQL| PK user_id, unique email| Patroni, primary + 2 реплики, WAL и бэкапы|
-|ArtistProfile / Album / Track| MongoDB| ID; индексы artist_user_id/album_id; шарды по тестам| replica set, снимки|
-|MediaAsset / AudioVariant| MongoDB| media_id; unique (track_id, bitrate)| снимки и сверка с объектами|
-|TrackSearchDocument| OpenSearch| _id=track_id, текстовый индекс и фильтры| реплики, перестроение из каталога [^29]|
-|Аудио и изображения| Ceph RGW| object_key; востребованные копии на CDN| репликация ×3, версии/резервирование контента|
-|UserTrackLike / UserArtistFollow| Cassandra| partition=user_id, clustering=ID объекта; LWT по version, SERIAL/QUORUM| RF=3, snapshot и CDC [^28]|
-|Playlist / PlaylistItem| PostgreSQL| playlist_id; индекс порядка; правка элемента и revision транзакционно| hash-партиции по playlist_id, WAL и бэкапы|
-|FeedDefinition| PostgreSQL| feed_id/version; параметры генератора| история конфигурации и бэкапы|
-|PlaybackContext / QueueItem| Redis Cluster| общий hash tag контекста, атомарная страница и cursor; TTL 24 часа| реплики, failover Cluster [^26]; при потере контекст пересоздаётся|
-|UserTrackCandidate / TrackNeighborCandidates| Redis Cluster| user_id/track_id + model_version, компактные снимки| пересчёт; закреплённые версии живут до истечения контекстов|
-|PlaybackSession| Cassandra| session_id; обновление только с новым sequence, TTL 7 суток| журнал событий|
-|UserActivityHistory| Cassandra| partition=(user_id, event_type, day), сортировка по времени/event_id; TTL 7 суток| переигрывание журнала|
-|TrackCounters / ArtistCounters| Redis Cluster| (entity_id, shard), абсолютное значение и версия| changelog, снимки и сверка|
-|CounterSnapshot| ClickHouse| ORDER BY (entity_type, entity_id, snapshot_date)| репликация и бэкапы|
-|UserActivityEvent| Kafka -> ClickHouse| ключ агрегата; DWH сортируется по типу/времени/user_id/event_id| Kafka RF=3, retention 7 суток; DWH 1 год|
-|TrackEmbedding| ClickHouse| (model_version, track_id), batch-доступ| версия модели и повторный расчёт|
+PostgreSQL исключён: основные операции выполняются по ключу/документу, междоменные JOIN/FK не используются. Конфиг FeedDefinition и плейлист с items — документы MongoDB; revision проверяется в условии атомарного обновления [^43]. БД auth/users/catalog/recommendations имеют отдельных владельцев и учётные данные; общий физический кластер — компромисс стоимости, доступа к чужим коллекциям нет [^44].
 
-CDC доставляет изменения реакций в Kafka. Обработчик устраняет повторы по event_id/version и публикует идемпотентные проекции; состояние сохраняется с changelog [^27][^28].
+|Данные / владелец | Размещение и шардирование | Индексы / согласованность|
+|:--|:--|:--|
+|AuthIdentity / Auth| MongoDB auth: hashed _id=нормализованный provider:subject или local:email| уникальность _id; user_id; majority+journal|
+|AuthSession / Auth| MongoDB auth: hashed _id=auth_session_id| user_id; TTL expires_at; CAS version для refresh; API проверяет expires_at/revoked_at|
+|User / Users| MongoDB users: hashed _id=user_id| чтение по ID; majority+journal|
+|ArtistProfile / Album / Track / MediaAsset / Catalog| MongoDB catalog: hashed _id сущности; AudioVariant вложены в Track.variants| artist_user_id, album_id; уникальный bitrate внутри трека проверяется атомарным обновлением|
+|Playlist / FeedDefinition / RecommendationModel / Recommendations| MongoDB recommendations: hashed _id=playlist_id/feed_id/model_id| owner_user_id; items и revision в одном документе; артефакты по object_key в собственном Ceph-бакете|
+|TrackSearchDocument / Catalog| OpenSearch: 12 primary shards, routing=hash(track_id), 2 replica каждого| zone awareness по трём ДЦ; API только читает, CatalogIndexWorker пишет; версии metadata/signals отдельно|
+|UserTrackLike / UserArtistFollow / Reactions| Cassandra: token ring, partition=user_id; clustering=track_id/artist_user_id| RF=3 по ДЦ, QUORUM; изменения через LWT/SERIAL; version/request_id [^28]|
+|PlaybackSession / Playback| Cassandra: partition=session_id| RF=3, QUORUM; sequence; TTL 7 суток|
+|UserActivityHistory / Playback| Cassandra: partition=(user_id,event_type,day), clustering=(occurred_at,event_id)| дневные партиции, TTL 7 суток; запись только projector worker|
+|PlaybackContext / QueueItem / Playback| Redis Cluster: hash tag {context_id}, ordinal| страница + cursor атомарны в одном slot; TTL 24 часа; утрата → новый контекст|
+|EngineResultCache / Recommendations| Redis Cluster: hash(engine,config/model version,user/seed,filters,signals_version,source_revision,source_cursor,exclude_hash)| до 100 кандидатов/ключ; TTL 5 минут, cache-aside; это не база готовых рекомендаций|
+|TrackCounters / ArtistCounters / Event platform| Redis Cluster: ключ entity_type:entity_id:bucket; hot-объекты — до 16 buckets в разных slots| CounterAggregatorWorker читает Kafka; материализованный итог обновляется раз в секунду; read API не считает события|
+|DomainEvent / Event platform + DWH| Kafka: ключ агрегата; playback.raw — 192 partitions, reactions/counted — по 96; ClickHouse: hash(aggregate_key) % 3, PARTITION BY toYYYYMM(occurred_at)| RF=3, minISR=2, acks=all; Kafka 7 суток; DWH 1 год, ORDER BY(event_type,toDate(occurred_at),aggregate_key,event_id)|
+|CounterSnapshot / Analytics| ClickHouse: hash(entity_id) % 3, PARTITION BY месяц snapshot_date| ORDER BY(type,id,date); watermark; 3 реплики шарда|
+|TrackContentEmbedding / Recommendations| Parquet по hash(track_id) % 64 и model_version в Ceph; HNSW в RAM движка| отдельная CONTENT-модель, BPR-факторы в другом артефакте|
+|Аудио / изображения / Catalog| Ceph: object_key → CRUSH, 12 OSD-хостов| size=3, min_size=2; копии в разных ДЦ; CDN LFU|
 
-Реплики и кворумы размещаются с расчётом на потерю одного ДЦ.
+MongoDB: **2 шарда × 3 реплики** (по копии каждого шарда в ДЦ), 3 config server всего и 2 mongos на ДЦ; majority-записи и выборы primary [^30], chunks распределяются balancer по hashed-ключам [^43]. UUID/_id lookup таргетируется; выборки по артисту/владельцу используют индексы, при отсутствии shard key обращаются к двум шардам.
+
+Cassandra — 9 узлов, token-aware routing, NetworkTopologyStrategy: по одной копии в каждом ДЦ (всего RF=3). Redis — 6 primary + 6 replica с anti-affinity между ДЦ; собственные префиксы/ACL у Playback, Recommendations и платформы событий. ClickHouse — 3 шарда × 3 реплики. Шардирование делит данные, репликация создаёт копии; реплики одного набора не совмещаются на одном хосте.
+
+CDC-агенты владельцев публикуют изменения в Kafka с checkpoint; event_id воспроизводим из ключа агрегата и version. Playback API подтверждает STARTED в Kafka перед выдачей аудиоссылки; EventIngest принимает heartbeat/finish. PlaybackProjector формирует сессии/историю и TRACK_PLAY_COUNTED; CounterAggregator считает реакции/прослушивания **только из Kafka**, поддерживает changelog и публикует абсолютные COUNTER_UPDATED. DWHWriter архивирует, Snapshot Cron запрашивает снимок по watermark. Повторное событие не должно повторно менять результат [^27].
 
 ## 7. Алгоритмы
 
-### 7.1. Генерация рекомендаций и очереди
+### 7.1. Генерация рекомендаций
 
-**Офлайн, периодически:**
+**Офлайн — независимые артефакты:**
 
-1. Собрать признаки из DWH и снимков лайков/подписок; накопленный listened_ms из heartbeat повторно не суммировать.
-2. Обучить коллаборативную MF-модель на GPU (128 компонент FP32, раздел 11.4), сохранить TrackEmbedding; HNSW построить на CPU. Вектор занимает 512 байт, прежний бюджет до 2 КБ оставлен с запасом.
-3. По векторам пользователей получить top-200 UserTrackCandidate, по векторам треков — top-50 TrackNeighborCandidates. Передать готовую model_version в Recommendations API для публикации в Redis.
+1. FeatureExport Cron готовит из DWH положительные взаимодействия: засчитанные прослушивания/лайки; накопленный listened_ms из heartbeat не суммируется повторно.
+2. CollabTrain Job обучает **BPR-MF, 128 FP32** на GPU: для тройки (user, positive, negative) повышает разность u·v_positive − u·v_negative; SGD с разреженными градиентами [^45]. Результат — пользовательские/трековые факторы COLLAB. CoListen Cron отдельно строит top-50 по совместным прослушиваниям последних 20 треков пользователя; COLLAB-версия готова только после обоих артефактов.
+3. ContentIndex Cron отдельно строит **TF-IDF по метаданным/жанрам → TruncatedSVD(128) → нормализация → HNSW cosine**. SVD обучается на выборке, каталог преобразуется батчами; это TrackContentEmbedding, а не факторы BPR [^46].
+4. Popularity Cron готовит top по жанру/общему каталогу за 24 часа. Версионные артефакты пишутся в Ceph, MODEL_READY обрабатывает ModelPublishWorker; движки загружаются по ДЦ с fallback при обновлении. Готовые персональные списки на всех пользователей не сохраняются.
 
-|Контекст | Источник следующей порции|
+**Движки вызываются при запросе**, каждый возвращает до 100 упорядоченных кандидатов:
+
+|Движок | Генерация кандидатов|
 |:--|:--|
-|TRACK| выбранный трек; затем конец или переход к SIMILAR|
-|STATIC_PLAYLIST| PlaylistItem по порядку, с revision|
-|PERSONALIZED («Моя волна»)| персональные кандидаты, соседи и популярное как fallback|
-|GENRE / TRENDING| каталог с фильтром жанра и popularity_score|
-|SIMILAR| соседи seed-трека, затем fallback|
+|BPR| до 1000 co-listen соседей последних 20 положительных треков + до 1000 популярных; вычислить r_cf(t)=u·v_t только на этом пуле, выбрать top-100; без ANN и полного сканирования каталога|
+|CoListen| top соседей seed-трека по совместным прослушиваниям|
+|ContentANN| HNSW по контентному вектору seed / до 5 недавних положительных треков|
+|Popular| актуальный жанровый/общий top|
+|FollowedArtists| новые треки подписанных артистов через Reactions/Catalog API|
+|StaticPlaylist| следующая часть Playlist.items по порядку и revision|
 
-**Онлайн, при пополнении ленты/SIMILAR:**
+FeedDefinition хранит состав движков, их лимиты/веса, фильтры и ranker:
 
-1. Объединить кандидатов из таблицы выше с соседями последних положительных действий пользователя; отфильтровать недоступные треки, повторы и неподходящий жанр.
-2. Пересчитать score = α·base_score + β·recent_affinity + γ·is_followed_artist. Сигналы нормализованы в [0,1], веса подбираются на отложенных данных; recent_affinity — близость по снимкам соседей до пяти последних прослушанных/лайкнутых треков.
-3. Отсортировать по score и жадно выбрать до 20 треков, не допуская более двух подряд от одного артиста. При нехватке — популярное в заданном жанре, затем конец выдачи.
-4. Атомарно сохранить страницу и cursor в очереди до 200 элементов; повтор cursor возвращает ту же страницу. Свежие действия влияют на следующую порцию без ожидания batch-пересчёта.
+|Запрос | Движки / веса | Итоговое ранжирование|
+|:--|:--|:--|
+|STATIC_PLAYLIST| StaticPlaylist| NONE, сохраняется порядок|
+|PERSONALIZED| BPR:3, ContentANN:2, FollowedArtists:1, Popular:1| weighted RRF|
+|GENRE| BPR:2, ContentANN:1, Popular:2; genre обязателен| weighted RRF|
+|TRENDING| Popular| порядок популярности|
+|SIMILAR| ContentANN:3, CoListen:2, Popular:1| weighted RRF|
+|TRACK| выбранный трек; продолжение отдельным SIMILAR-запросом| NONE|
 
-Для TRACK и STATIC_PLAYLIST ранжирование не применяется: сохраняется выбранный трек или порядок PlaylistItem.
+**Онлайн-конвейер:**
 
-Модель/источник закреплены в PlaybackContext. При смене revision контекст обновляется; при нехватке кандидатов — fallback или конец выдачи.
+1. Recommendations API выбирает FeedDefinition и получает личные сигналы через History/Reactions API. На промахе EngineResultCache запускает движки; ключ содержит версии модели/конфига/сигналов, source revision/cursor, seed, фильтры и hash исключённых ID, TTL 5 минут.
+2. Для динамических лент Merger объединяет списки и удаляет дубли по track_id; Catalog API проверяет доступность/жанр, исключаются уже выданные/стоящие в очереди треки. STATIC идёт по item_id/source_cursor: намеренные повторы track_id сохраняются.
+3. **Только затем ranker** вычисляет Score(t)=Σ w_engine/(60+rank_engine(t)), отсутствующий трек даёт 0 [^47]. Это финальное ранжирование общего пула, а r_cf внутри BPR — отбор кандидатов одним движком. Для STATIC/TRACK RRF отключён.
+4. Выбрать до 20 треков; в динамических лентах — не более двух подряд одного артиста. При нехватке — Popular с нужными фильтрами, затем конец. Для STATIC сохраняется порядок доступных элементов.
+5. Playback API получает результат и атомарно дополняет **свою** очередь до 200 элементов вместе с cursor. Повтор cursor возвращает материализованную страницу. При изменении revision статичного плейлиста контекст обновляется; динамическая следующая порция может использовать свежую модель.
+
+Личные сигналы обновляются после обработки событий онлайн-проекцией, без ожидания обучения BPR. EngineResultCache можно удалить и пересчитать; модель/конфиг — постоянные данные, очередь — состояние воспроизведения.
 
 ### 7.2. Вытеснение кэша CDN
 
@@ -582,8 +640,8 @@ CDC доставляет изменения реакций в Kafka. Обраб�
 |:--|:--|:--|:--|:--|
 |Оркестрация и деплой|Kubernetes|stateless app-слой|VM / Docker Compose|размещение, перезапуск и масштабирование pod; ingress устанавливается отдельно|
 |Оркестрация и деплой|GitLab CI + ArgoCD|CI/CD в трёх ДЦ|ручной kubectl apply|сборка/проверки и воспроизводимая доставка конфигурации из Git|
-|Виртуализация|KVM / libvirt|совместное размещение разных БД на мощных хостах|отдельные bare-metal узлы|выделенные vCPU/RAM и диски; реплики одной БД на разных хостах [^39]|
-|Обучение|PyTorch / TorchRec / CUDA|офлайн MF на GPU|CPU-обучение|128-компонентные embeddings, SGD с разреженными градиентами; HNSW остаётся на CPU [^37]|
+|Виртуализация|KVM / libvirt|два MongoDB-шарда либо Kafka/OpenSearch на общем хосте|отдельные bare-metal узлы|выделенные vCPU/RAM и диски; реплики одного шарда на разных хостах [^39]|
+|Обучение|PyTorch / TorchRec / CUDA|BPR-MF на GPU|CPU-обучение|128-компонентные факторы COLLAB; SGD и шардирование [^37][^45]|
 |Балансировка и сеть|NGINX Ingress Controller (nginx/kubernetes-ingress, OSS)|входящий HTTP(S)|Traefik / HAProxy|TLS, маршрутизация, least_conn; выбран поддерживаемый проект NGINX [^19]|
 |Балансировка и сеть|kube-proxy, nftables|Kubernetes Service|iptables / eBPF-CNI|L4-правила на совместимых Linux-узлах; IPVS-режим kube-proxy устарел [^20]|
 |Балансировка и сеть|LVS/IPVS DR + keepalived|балансировка CDN-площадки|NAT / Tunneling|ответ обходит LB; общая L2-сеть, VRRP-переключение VIP|
@@ -591,19 +649,18 @@ CDC доставляет изменения реакций в Kafka. Обраб�
 |Балансировка и сеть|Anycast/BGP|выбор CDN-площадки|GeoDNS|смена маршрута без DNS TTL; остаётся задержка сходимости BGP|
 |Балансировка и сеть|Sidecar proxy (Envoy)|межсервисные вызовы|клиентская балансировка|общие политики тайм-аутов/балансировки; требует discovery адресов экземпляров|
 |Балансировка и сеть|CoreDNS|DNS-имена сервисов|Consul|использует сведения Kubernetes; загрузку pod не измеряет|
-|Хранилища|PostgreSQL + Patroni + PgBouncer|аккаунты, статичные плейлисты, рецепты лент|MySQL|транзакции для элементов/revision, failover и пул соединений|
-|Хранилища|MongoDB|каталог и метаданные медиа|PostgreSQL|документная модель и чтения по ID; шарды по результатам тестов|
+|Хранилища|MongoDB|Auth, Users, Catalog, конфиги/плейлисты Recommendations|PostgreSQL|2 шарда; отдельные БД доменов; атомарные документы Playlist.items/revision [^43]|
 |Поиск|OpenSearch|TrackSearchDocument|индекс MongoDB / Elasticsearch|текстовый индекс, жанровые фильтры; перестраивается из каталога [^29]|
 |Хранилища|Cassandra + CDC-потребитель|лайки, подписки, сессии, история|PostgreSQL / распределённый KV-store|доступ по пользовательским ключам; LWT/QUORUM для реакций, TTL истории [^28]|
-|Хранилища|Redis Cluster|кандидаты, очередь, счётчики|PostgreSQL / MongoDB|доступ по ключу, TTL и атомарные операции; реплики и восстановление|
+|Хранилища|Redis Cluster|кэш движков, Playback context/queue, проекции счётчиков|MongoDB|разные ACL/префиксы; TTL, hash slots, атомарные страницы [^26]|
 |Хранилища|Kafka|события и changelog|прямая запись в проекции|входные события хранятся 7 суток; changelog состояния — compact; порядок по агрегату и replay [^27]|
 |Обработка событий|Kafka Streams|дедупликация и проекции|Flink / собственные потребители|состояние с changelog; внешние проекции записываются идемпотентно [^27]|
-|Хранилища|ClickHouse|DWH, снимки счётчиков, эмбеддинги|PostgreSQL / batch-движок|колоночные чтения для аналитики и обучения|
+|Хранилища|ClickHouse|DomainEvent, CounterSnapshot, датасеты|batch-движок|колоночные чтения, 3 шарда × 3 реплики|
 |Хранилища|ClickHouse Keeper|координация реплик|ZooKeeper|компонент экосистемы ClickHouse; требуется отказоустойчивый кворум [^21]|
 |Хранилища|Ceph RGW|аудио и изображения|managed S3|контроль размещения/репликации, S3 API; самостоятельная эксплуатация|
 |Кэширование|собственный HTTP-кэш на NVMe, LFU с окном|CDN|Varnish LRU / NGINX proxy_cache|частота удерживает хиты; LFU реализуется отдельно, штатный Varnish использует LRU [^22]|
-|Рекомендации|HNSW|подготовка снимков кандидатов|Annoy / brute-force|приближённый поиск и инкрементальное добавление; качество/память измеряются [^23]|
-|Доступ|OAuth 2.0, JWT|доступ к API|серверные сессии|OAuth — авторизация, JWT — токен с локальной проверкой; отзыв требует отдельного механизма [^24]|
+|Рекомендации|TF-IDF / TruncatedSVD / HNSW|отдельный ContentANN engine|Annoy / точный cosine|контентные признаки независимо от BPR; онлайн top-100 [^23][^46]|
+|Доступ|OAuth 2.0 / OIDC, JWT + refresh-сессии|Auth API; профиль отдельно в Users|серверные access-сессии|JWT 15 мин, AuthSession до 30 дней; отзыв refresh и проверка срока [^24][^42]|
 |Эксплуатация|Prometheus + Grafana + Alertmanager|метрики и оповещения|Zabbix|сбор, визуализация и доставка тревог; failover выполняют сами компоненты [^25]|
 |Эксплуатация|ELK/EFK или Loki|централизованные логи|Graylog / OpenSearch|единый поиск ошибок по сервисам и ДЦ|
 |Тестирование|Yandex.Tank / k6 / Gatling|нагрузочные испытания|собственный генератор|воспроизводимые RPS/CPS, p95/p99 и доля ошибок|
@@ -626,106 +683,178 @@ CDC доставляет изменения реакций в Kafka. Обраб�
 
 ## 10. Схема проекта
 
-Service layer + API-composition (лекция 9, слайды 14–20). Хранилища закреплены за доменами; чужие данные доступны через API владельца или события.
+Домены владеют своими данными; фоновые worker/job/cron выделены отдельно. R — чтение, W — запись/команда, P/C — публикация/чтение событий. Пунктир — Kafka; мягкие линии и подписи заменяют угловатые связи.
 
 ```mermaid
-flowchart TB
+%%{init: {"layout": "dagre", "look": "classic", "flowchart": {"curve": "bumpX", "nodeSpacing": 24, "rankSpacing": 48}, "themeVariables": {"fontSize": "13px"}}}%%
+flowchart LR
     Client(["Клиент"])
     Front["API Gateway / Composition"]
-    CDN["CDN / LFU-кэш"]
-    Events[("Kafka<br/>события + changelog")]
-
-    subgraph USERS["Домен: аккаунты"]
-        UserApi["Auth / Users API"]
-        UserDB[("PostgreSQL<br/>User")]
-        UserApi --> UserDB
-    end
-
-    subgraph CATALOG["Домен: каталог, поиск и медиа"]
-        CatalogApi["Catalog / Search API<br/>обновление индекса"]
-        CatalogDB[("MongoDB<br/>ArtistProfile, Album, Track<br/>MediaAsset, AudioVariant")]
-        SearchDB[("OpenSearch<br/>TrackSearchDocument")]
-        MediaStore[("Ceph RGW<br/>аудио / изображения")]
-        CatalogApi --> CatalogDB
-        CatalogApi --> SearchDB
-        CatalogApi -->|"object_key / загрузка"| MediaStore
-    end
-
-    subgraph PLAYLISTS["Домен: статичные подборки"]
-        PlaylistApi["Playlists API"]
-        PlaylistDB[("PostgreSQL<br/>Playlist, PlaylistItem")]
-        PlaylistApi --> PlaylistDB
-    end
-
-    subgraph REACTIONS["Домен: реакции и счётчики"]
-        ReactionApi["Reactions / Counters API<br/>CDC + потоковая обработка"]
-        ReactionDB[("Cassandra<br/>UserTrackLike<br/>UserArtistFollow")]
-        CounterDB[("Redis Cluster<br/>TrackCounters<br/>ArtistCounters")]
-        ReactionApi -->|"текущее состояние"| ReactionDB
-        ReactionApi -->|"агрегаты"| CounterDB
-    end
-
-    subgraph PLAYBACK["Домен: воспроизведение и история"]
-        PlaybackApi["Streaming / History API<br/>потребитель playback-событий"]
-        PlaybackDB[("Cassandra<br/>PlaybackSession<br/>UserActivityHistory")]
-        PlaybackApi --> PlaybackDB
-    end
-
-    subgraph RECOMMENDATIONS["Домен: рекомендации и очередь"]
-        RecommendationApi["Recommendations API<br/>онлайн-генератор очереди"]
-        RecipeDB[("PostgreSQL<br/>FeedDefinition")]
-        QueueDB[("Redis Cluster<br/>UserTrackCandidate<br/>TrackNeighborCandidates<br/>PlaybackContext, PlaybackQueueItem")]
-        RecommendationApi --> RecipeDB
-        RecommendationApi --> QueueDB
-    end
-
-    subgraph ANALYTICS["Домен: аналитика и ML"]
-        AnalyticsApi["DWH ingestion / Batch ML<br/>обучение + HNSW"]
-        AnalyticsDB[("ClickHouse<br/>UserActivityEvent<br/>CounterSnapshot, TrackEmbedding")]
-        AnalyticsApi --> AnalyticsDB
-    end
-
+    CDN["CDN / LFU"]
     Client -->|"API"| Front
-    Client -->|"медиа"| CDN
-    CDN -->|"промах кэша"| MediaStore
+    Client -->|"R медиа"| CDN
 
-    Front --> UserApi
-    Front --> CatalogApi
-    Front --> PlaylistApi
-    Front --> ReactionApi
-    Front --> PlaybackApi
-    Front --> RecommendationApi
+    subgraph AUTH["Auth"]
+        AuthApi["Auth API"]
+        AuthDb[("MongoDB auth<br/>AuthIdentity, AuthSession<br/>user_id")]
+        Provision["Provision worker"]
+        AuthApi -->|"R/W identity, session"| AuthDb
+        Provision -->|"R/W PENDING → ACTIVE"| AuthDb
+    end
 
-    CatalogApi -->|"аккаунт артиста"| UserApi
-    PlaybackApi -->|"аудиоверсия / доступность"| CatalogApi
-    RecommendationApi -->|"метаданные / жанр / популярное"| CatalogApi
-    RecommendationApi -->|"статичная подборка"| PlaylistApi
-    RecommendationApi -->|"свежая история"| PlaybackApi
-    RecommendationApi -->|"лайки / подписки"| ReactionApi
+    subgraph USERS["Users"]
+        UserApi["Users API"]
+        UserDb[("MongoDB users<br/>User")]
+        UserApi -->|"R/W профиль"| UserDb
+    end
+    Provision -->|"API W профиль по user_id"| UserApi
 
-    CatalogApi -.->|"изменения каталога"| Events
-    Events -.->|"каталог / популярность: индекс"| CatalogApi
-    ReactionApi -.->|"CDC реакций / CounterUpdated"| Events
-    Events -.->|"реакции / прослушивания: счётчики"| ReactionApi
-    PlaybackApi -.->|"start / heartbeat / finish"| Events
-    Events -.->|"playback: сессии и история"| PlaybackApi
-    Events -.->|"события и снимки счётчиков"| AnalyticsApi
-    AnalyticsApi -->|"публикация версии кандидатов"| RecommendationApi
+    subgraph CATALOG["Каталог / поиск / медиа"]
+        CatalogApi["Catalog / Search API"]
+        CatalogDb[("MongoDB catalog<br/>Artist, Album, Track, Media")]
+        SearchDb[("OpenSearch")]
+        MediaStore[("Ceph: медиа")]
+        CatalogCdc["Catalog CDC worker"]
+        Indexer["CatalogIndexWorker"]
+        MediaWorker["Media publish worker"]
+        CatalogApi -->|"R/W метаданные"| CatalogDb
+        CatalogApi -->|"R поиск"| SearchDb
+        CatalogCdc -->|"R change stream"| CatalogDb
+        Indexer -->|"R backfill"| CatalogDb
+        Indexer -->|"W индекс / версии"| SearchDb
+        MediaWorker -->|"R/W PENDING / READY"| CatalogDb
+        MediaWorker -->|"W объекты"| MediaStore
+    end
+    CatalogApi -->|"API R user_id артиста"| UserApi
+    CDN -->|"R промах"| MediaStore
 
-    classDef service fill:#deebff,stroke:#527bbd
-    classDef database fill:#fff0cf,stroke:#c58a25
+    subgraph REACTIONS["Реакции"]
+        ReactionApi["Reactions API"]
+        ReactionDb[("Cassandra<br/>Like / Follow")]
+        ReactionCdc["Reaction CDC agents"]
+        ReactionApi -->|"R/W личное состояние"| ReactionDb
+        ReactionCdc -->|"R CDC log"| ReactionDb
+    end
+
+    subgraph PLAYBACK["Воспроизведение / история"]
+        PlaybackApi["Playback / History API"]
+        PlaybackDb[("Cassandra<br/>PlaybackSession / History")]
+        QueueDb[("Redis: context / queue")]
+        Projector["PlaybackProjector worker"]
+        PlaybackApi -->|"R сессии / история"| PlaybackDb
+        PlaybackApi -->|"R/W context / cursor"| QueueDb
+        Projector -->|"W проекции"| PlaybackDb
+    end
+    PlaybackApi -->|"API R аудиоверсия"| CatalogApi
+
+    subgraph RECS["Рекомендации / плейлисты"]
+        RecApi["Recommendations API<br/>Static / Popular / Followed<br/>merger + RRF"]
+        RecDb[("MongoDB recommendations<br/>Playlist.items / FeedDefinition<br/>RecommendationModel")]
+        RecCache[("Redis: EngineResultCache<br/>top-100 / TTL 5 мин")]
+        Models[("Ceph: модели / CONTENT")]
+        CfEngine["BPR / CoListen engines"]
+        AnnEngine["ContentANN engine"]
+        TrainJob["CollabTrain GPU job"]
+        ContentCron["ContentIndex Cron"]
+        PopularCron["Popularity Cron"]
+        CoListenCron["CoListen Cron"]
+        RecCdc["Recommendations CDC"]
+        ModelWorker["ModelPublishWorker"]
+        RecApi -->|"R/W плейлисты / конфиги"| RecDb
+        RecApi -->|"R/W кэш движков"| RecCache
+        RecApi -->|"R top-100"| CfEngine
+        RecApi -->|"R top-100"| AnnEngine
+        CfEngine -->|"R COLLAB"| Models
+        AnnEngine -->|"R CONTENT / HNSW"| Models
+        CfEngine -->|"R/W кэш"| RecCache
+        AnnEngine -->|"R/W кэш"| RecCache
+        RecApi -->|"R POPULAR"| Models
+        TrainJob -->|"W COLLAB"| Models
+        TrainJob -->|"W manifest COLLAB"| RecDb
+        ContentCron -->|"W CONTENT / HNSW"| Models
+        ContentCron -->|"W READY manifest"| RecDb
+        PopularCron -->|"W POPULAR"| Models
+        PopularCron -->|"W READY manifest"| RecDb
+        CoListenCron -->|"W co-listen"| Models
+        CoListenCron -->|"W соседи / manifest"| RecDb
+        RecCdc -->|"R change stream"| RecDb
+        ModelWorker -->|"R/W active version"| RecDb
+        ModelWorker -->|"W reload"| CfEngine
+        ModelWorker -->|"W reload"| AnnEngine
+    end
+    RecApi -->|"API R сигналы"| ReactionApi
+    RecApi -->|"API R история"| PlaybackApi
+    RecApi -->|"API R метаданные / фильтры"| CatalogApi
+    ContentCron -->|"API R bulk metadata"| CatalogApi
+    PlaybackApi -->|"API R порция треков"| RecApi
+
+    subgraph EVENTS["Платформа событий / счётчики"]
+        IngestApi["Event Ingest API"]
+        Kafka[("Kafka")]
+        CounterWorker["CounterAggregator worker"]
+        CounterDb[("Redis: CounterReadModel")]
+        CounterApi["Counters Read API"]
+        SnapshotCron["Snapshot Cron"]
+        IngestApi -.->|"P heartbeat / finish"| Kafka
+        Kafka -.->|"C reactions / counted / control"| CounterWorker
+        CounterWorker -->|"W абсолютные итоги"| CounterDb
+        CounterApi -->|"R готовые итоги"| CounterDb
+        SnapshotCron -.->|"P snapshot request"| Kafka
+        CounterWorker -.->|"P CounterUpdated / Snapshot"| Kafka
+    end
+    PlaybackApi -.->|"P start, event_id от request_id"| Kafka
+    CatalogCdc -.->|"P CatalogChanged"| Kafka
+    ReactionCdc -.->|"P ReactionChanged"| Kafka
+    RecCdc -.->|"P ModelReady / config"| Kafka
+    Kafka -.->|"C CatalogChanged / CounterUpdated"| Indexer
+    Kafka -.->|"C playback / reactions"| Projector
+    Projector -.->|"P TrackPlayCounted"| Kafka
+    Kafka -.->|"C ModelReady"| ModelWorker
+
+    subgraph ANALYTICS["DWH / датасеты"]
+        DwhWriter["DWHWriter worker"]
+        Dwh[("ClickHouse<br/>DomainEvent / CounterSnapshot")]
+        DatasetApi["Dataset API"]
+        ExportCron["FeatureExport Cron"]
+        Features[("Ceph: датасеты")]
+        DwhWriter -->|"W архив / снимки"| Dwh
+        ExportCron -->|"R признаки"| Dwh
+        ExportCron -->|"W snapshot"| Features
+        DatasetApi -->|"R snapshot"| Features
+        DatasetApi -->|"R агрегаты"| Dwh
+    end
+    Kafka -.->|"C бизнес-события"| DwhWriter
+    TrainJob -->|"API R training snapshot"| DatasetApi
+    PopularCron -->|"API R top за 24 часа"| DatasetApi
+    CoListenCron -->|"API R co-listen пары"| DatasetApi
+
+    Front -->|"R/W доступ"| AuthApi
+    Front -->|"R/W профиль"| UserApi
+    Front -->|"R каталог / поиск"| CatalogApi
+    Front -->|"R/W реакции"| ReactionApi
+    Front -->|"R/W воспроизведение"| PlaybackApi
+    Front -->|"R/W подборки"| RecApi
+    Front -->|"W телеметрия"| IngestApi
+    Front -->|"R счётчики"| CounterApi
+
+    classDef api fill:#deebff,stroke:#527bbd
+    classDef worker fill:#eee0ff,stroke:#8a63b8
+    classDef db fill:#fff0cf,stroke:#c58a25
     classDef entry fill:#e2efd5,stroke:#729857
-    class UserApi,CatalogApi,PlaylistApi,ReactionApi,PlaybackApi,RecommendationApi,AnalyticsApi service
-    class UserDB,CatalogDB,SearchDB,MediaStore,PlaylistDB,ReactionDB,CounterDB,PlaybackDB,RecipeDB,QueueDB,AnalyticsDB,Events database
-    class Front,CDN entry
+    class AuthApi,UserApi,CatalogApi,ReactionApi,PlaybackApi,RecApi,CounterApi,IngestApi,DatasetApi,CfEngine,AnnEngine api
+    class Provision,CatalogCdc,Indexer,MediaWorker,ReactionCdc,Projector,TrainJob,ContentCron,PopularCron,CoListenCron,RecCdc,ModelWorker,CounterWorker,SnapshotCron,DwhWriter,ExportCron worker
+    class AuthDb,UserDb,CatalogDb,SearchDb,MediaStore,ReactionDb,PlaybackDb,QueueDb,RecDb,RecCache,Models,Kafka,CounterDb,Dwh,Features db
+    class Client,Front,CDN entry
 ```
 
-Сплошные стрелки — API/операции с хранилищем, пунктир — события. API-composition объединяет каталог, личные реакции и счётчики для выдачи карточек. Блоки БД — логические области кластеров из раздела 6; сервисы и БД развёрнуты отдельно.
+Синие узлы — API/онлайн-движки, фиолетовые — фоновые процессы, жёлтые — данные. Единственный писатель OpenSearch — CatalogIndexWorker. Счётчики строятся из Kafka; фронт читает готовую проекцию. Provision worker создаёт профиль по user_id перед активацией AuthIdentity.
+
+MongoDB-блоки — разные БД/ACL на общем шардированном кластере; Redis-блоки — разные префиксы/ACL; Ceph — отдельные бакеты владельцев. Совместные физические хосты из раздела 11 не дают сервисам доступа к чужим данным. Междоменные ссылки разрешаются через API или события.
 
 
 ## 11. Список серверов
 
-Расчёт по [лекции 11](https://github.com/init/highload/blob/main/highload_l11_hosting.md): аренда bare-metal; приложения и Ingress совместно в Kubernetes, часть БД — в отдельных KVM-VM на общих хостах, обучение — на GPU. База: 45 978 API RPS, 207,9 Гбит/с медиа, ~27 ПБ внешнего трафика за 30 суток. Сравнение с раздельным размещением — в 11.5.
+Расчёт по [лекции 11](https://github.com/init/highload/blob/main/highload_l11_hosting.md): аренда bare-metal; приложения и Ingress совместно в Kubernetes, часть БД — в отдельных KVM-VM на общих хостах, обучение — на GPU. База: 46 868 API RPS, 207,9 Гбит/с медиа, ~27 ПБ внешнего трафика за 30 суток. Сравнение с раздельным размещением — в 11.5.
 
 ### 11.1. Хостинг и оборудование
 
@@ -744,81 +873,96 @@ CPU core-серверов — физические ядра x86-64, SMT откл
 |:--|:--|:--|:--|--:|--:|--:|--:|
 |K8s workers: API, Ingress, обработчики, RGW, эксплуатация| 64 / 256| 2×1,92 NVMe, RAID1| 2×25 Гбит/с| 18 (6/ДЦ)| 70| 1260| 1,85|
 |K8s control plane / etcd| 8 / 32| 2×0,48 SSD, RAID1| 2×10 Гбит/с| 9 (3/ДЦ)| 12| 108| 0,5|
-|Координаторы: Patroni DCS, Keeper, KRaft, Ceph MON/MGR, OpenSearch managers| 16 / 64| 2×0,96 SSD, RAID1| 2×10 Гбит/с| 3 (1/ДЦ)| 25| 75| 0,65|
-|Общие KVM-хосты: PostgreSQL + MongoDB| 80 / 768| 8×3,84 NVMe: отдельные RAID10 по 4 диска; 2×0,96 SSD под ОС| 2×25 Гбит/с| 3| 110| 330| 2,7|
+|Координаторы: MongoDB config server, Keeper, KRaft, Ceph MON/MGR, OpenSearch managers| 16 / 64| 2×0,96 SSD, RAID1| 2×10 Гбит/с| 3 (1/ДЦ)| 25| 75| 0,65|
+|Общие KVM-хосты: два MongoDB-шарда| 80 / 768| 8×3,84 NVMe: отдельные RAID10 по 4 диска; 2×0,96 SSD под ОС| 2×25 Гбит/с| 3| 110| 330| 2,7|
 |Cassandra| 32 / 128| 4×1,92 NVMe, JBOD| 2×25 Гбит/с| 9| 45| 405| 1,3|
 |Redis: 6 primary + 6 replica| 32 / 512| 2×1,92 NVMe, RAID1| 2×25 Гбит/с| 12| 65| 780| 1,4|
 |Общие KVM-хосты: Kafka broker + OpenSearch data node| 48 / 256| Kafka: 4×3,84 NVMe, JBOD; поиск: 2×3,84 NVMe, RAID1; 2×0,96 SSD под ОС| 2×25 Гбит/с| 6| 65| 390| 1,55|
 |ClickHouse: 3 шарда × 3 реплики| 32 / 256| 12×16 HDD, RAID10 + 2×0,96 SSD под ОС| 2×25 Гбит/с| 9| 95| 855| 2,2|
 |Ceph OSD| 32 / 128| 24×20 HDD, JBOD + 2×0,96 SSD под ОС + 2×3,84 NVMe, RAID1 под DB/WAL| 2×25 Гбит/с| 12| 125| 1500| 4|
-|CPU ML workers: признаки / HNSW| 64 / 512| 4×3,84 NVMe, JBOD| 2×25 Гбит/с| 3| 95| 285| 2,5|
+|Rec-engine hosts: BPR/CoListen, ContentANN, CPU jobs| 64 / 512| 4×3,84 NVMe, JBOD| 2×25 Гбит/с| 3| 95| 285| 2,5|
 |GPU train: 1×RTX PRO 6000 Blackwell, 96 ГБ VRAM на хост| 64 vCPU / 1024| 2×3,84 NVMe| 10 Гбит/с; private VLAN| 5 (4 рабочих + 1 резерв)| 230| 1150| 6|
 |CDN: HTTP-кэш LFU| 16 / 64| 2×3,84 NVMe под кэш| 2×10 Гбит/с| 25 (10/7/4/4)| 35| 875| 0,8|
 |CDN: LVS / keepalived| 16 / 32| 2×0,48 SSD, RAID1| 2×100 Гбит/с| 8 (2/площадку)| 30| 240| 0,7|
 |Бэкапы: отдельный репозиторий| 16 / 128| 24×20 HDD, RAID6 + 2×0,96 SSD под ОС| 2×10 Гбит/с| 6| 100| 600| 3,5|
 |**Итого**| | | | **128**| | **8853**| **237,55 всего**|
 
-RAID защищает от отказа диска, межсерверные копии — от отказа узла/ДЦ. JBOD — отдельные диски под управлением распределённого хранилища. На каждом сервере координаторов — по одному экземпляру каждого указанного компонента, до 2 CPU / 4 ГиБ на процесс. PostgreSQL обслуживает отдельные БД доменов в общем кластере.
+RAID защищает от отказа диска, межсерверные копии — от отказа узла/ДЦ. JBOD — отдельные диски под управлением распределённого хранилища. На каждом сервере координаторов — по одному экземпляру каждого указанного компонента, до 2 CPU / 4 ГиБ на процесс. MongoDB: два shard replica set по три VM, отдельные БД доменов; на каждом физическом хосте по одной VM каждого шарда.
 
 **Проверка ёмкости** (не более 70% заполнения; запас на индексы и служебные данные):
 
 |Хранилище | Доступно с учётом копий / резерва | Требуется|
 |:--|:--|:--|
-|Ceph| 12 × 24 × 20 × 0,7 / 3 = **1344 ТБ**| 1228,3 ТБ медиа + ~62 ТБ прироста за год; остаток — служебные данные|
-|PostgreSQL| 7,68 × 0,7 = **5,38 ТБ** на полную копию| ~1,31 ТБ таблиц; с индексами бюджет ~3 ТБ|
+|Ceph| 12 × 24 × 20 × 0,7 / 3 = **1344 ТБ**| 1228,3 ТБ медиа + ~62 ТБ/год + модели до 2 ТБ и датасеты до 5 ТБ|
+|MongoDB| 2 шарда × 7,68 × 0,7 = **10,75 ТБ**| Auth/Users/Catalog/плейлисты/конфиги: бюджет до 5 ТБ с индексами|
 |Cassandra| 9 × 7,68 × 0,7 / 3 = **16,13 ТБ**| история, реакции, сессии: бюджет до 8 ТБ с накладными расходами|
-|Redis| 6 primary × 512 × 0,7 = **2150 ГиБ**| две версии кандидатов, очереди и счётчики с накладными расходами: до 1,5 ТБ|
+|Redis| 6 primary × 512 × 0,7 = **2150 ГиБ**| очереди, engine cache и счётчики: бюджет до 1 ТБ с накладными расходами|
 |Kafka| 6 × 15,36 × 0,7 / 3 = **21,50 ТБ**| ~2,08 ТБ событий за 7 суток + changelog и накладные расходы|
-|OpenSearch| 6 × 3,84 × 0,7 / 2 = **8,06 ТБ**| проектный индекс до 1 ТБ; проверяется на 85 млн документов|
-|ClickHouse| 3 шарда × 96 × 0,7 = **201,6 ТБ**| DWH ~108,6 ТБ/год, снимки и эмбеддинги; бюджет ~150 ТБ|
+|OpenSearch| 6 × 3,84 × 0,7 / 3 = **5,38 ТБ**| проектный индекс до 1 ТБ; проверяется на 85 млн документов|
+|ClickHouse| 3 шарда × 96 × 0,7 = **201,6 ТБ**| playback-DWH ~108,6 ТБ/год плюс производные события/снимки; бюджет до 180 ТБ|
 |Бэкапы| 6 × 22 × 20 × 0,7 = **1848 ТБ** после RAID6| одна полная копия медиа/БД/DWH + 30 суток инкрементов, до 1600 ТБ|
 
 ### 11.2. Контейнеры и VM
 
-Количество контейнеров — **на один ДЦ штатно**, кроме суммарных значений. CPU r/l и RAM r/l — requests/limits на контейнер. Через «/» перечислены отдельные компоненты с одинаковыми ресурсами.
+Количество — **на один ДЦ штатно**, кроме суммарных значений. r/l — requests/limits на контейнер; через «/» перечислены отдельные компоненты с одинаковой аллокацией. Общие Cron и GitLab учтены в верхнем бюджете одного ДЦ.
 
 |Контейнер | Количество | CPU r/l | RAM r/l, ГиБ | Пул|
 |:--|:--|:--|:--|:--|
-|Auth / Playlists / Reactions API| 2 / 2 / 2| 2 / 4| 4 / 8| workers|
-|Catalog / Playback / Recommendations API| 4 / 8 / 3| 4 / 8| 8 / 16| workers|
+|Auth / Users / Reactions API| 2 / 2 / 2| 2 / 4| 4 / 8| workers|
+|Catalog / Event Ingest / Recommendations API| 4 / 8 / 3| 4 / 8| 8 / 16| workers|
+|Playback / History API| 2| 2 / 4| 4 / 8| workers|
+|Counters Read API| 2| 2 / 4| 4 / 8| workers|
+|Dataset API| 2| 1 / 2| 2 / 4| workers|
 |Gateway / Composition| 3| 2 / 4| 4 / 8| workers|
-|CDC / Media workers| 2 / 2| 2 / 4| 4 / 8| workers|
-|Kafka Streams / DWH consumers| 4 / 2| 4 / 8| 8 / 16| workers|
+|Catalog CDC / Recommendations CDC| 1 / 1| 2 / 4| 4 / 8| workers|
+|Provision worker / ModelPublishWorker| 1 / 1| 1 / 2| 2 / 4| workers|
+|PlaybackProjector / CounterAggregator| 2 / 2| 4 / 8| 8 / 16| workers|
+|DWHWriter| 2| 4 / 8| 8 / 16| workers|
+|CatalogIndexWorker| 2| 2 / 4| 4 / 8| workers|
+|Media publish worker| 2| 2 / 4| 4 / 8| workers|
+|mongos| 2| 2 / 4| 4 / 8| workers|
 |Ceph RGW| 2| 4 / 8| 8 / 16| workers|
-|Envoy, sidecar у API и Gateway| 24| 0,25 / 0,5| 0,5 / 1| workers|
+|Snapshot Cron| 1 всего| 2 / 4| 4 / 8| workers|
+|FeatureExport Cron| 1 всего| 2 / 4| 8 / 16| workers|
 |CoreDNS| 2| 0,5 / 1| 0,5 / 1| workers|
 |Prometheus| 2| 2 / 4| 8 / 16| workers|
 |Alertmanager| 1| 0,5 / 1| 1 / 2| workers|
 |Grafana / ArgoCD| 1 / 1| 1 / 2| 2 / 4| workers|
 |Loki| 1| 2 / 4| 8 / 16| workers|
 |CI runner| 1| 4 / 8| 8 / 16| workers|
-|GitLab / Registry, общий контейнер| 1 всего| 4 / 8| 8 / 16| workers|
-|Fluent Bit, сборщик логов| 1/узел, 30 всего| 0,25 / 0,5| 0,5 / 1| все K8s-пулы|
-|kube-proxy / CNI-agent| по 1/узел, по 30 всего| 0,25 / 0,5| 0,25 / 0,5| все K8s-пулы|
+|GitLab / Registry| 1 всего| 4 / 8| 8 / 16| workers|
+|Fluent Bit| 1/узел, 30 всего| 0,25 / 0,5| 0,5 / 1| все K8s-пулы|
+|kube-proxy / CNI| по 1/узел, по 30 всего| 0,25 / 0,5| 0,25 / 0,5| все K8s-пулы|
 |NGINX Ingress| 4| 8 / 12| 8 / 16| workers, разные узлы|
+|Envoy у worker API / Gateway| 30| 0,25 / 0,5| 0,5 / 1| workers|
 |kube-apiserver| 3| 1 / 2| 2 / 4| control plane|
 |etcd Kubernetes| 3| 1 / 2| 4 / 8| control plane|
 |kube-controller-manager| 3| 0,5 / 1| 1 / 2| control plane|
 |kube-scheduler| 3| 0,5 / 1| 0,5 / 1| control plane|
-|CPU batch / HNSW, шардированные данные| 1| 48 / 56| 384 / 448| CPU ML|
-|MF train, Docker / TorchRec| 4 рабочих + 1 резерв| — / 56 vCPU| — / 896| GPU-host; 1 GPU на контейнер|
+|BPR / CoListen engine, один сервис| 1| 16 / 24| 192 / 256| Rec-engine|
+|ContentANN engine| 1| 8 / 12| 96 / 128| Rec-engine|
+|CoListen / Popularity / ContentIndex Cron, отдельные Job| суммарно ≤1 heavy Job/ДЦ| 16 / 20| 64 / 96| Rec-engine, CPU batch quota|
+|Cassandra CDC agent, Docker на Cassandra| 1/узел, 9 всего| — / 1| — / 2| вне Kubernetes|
+|BPR train, Docker / TorchRec| 4 рабочих + 1 резерв| — / 56 vCPU| — / 896| GPU-host; 1 GPU на контейнер|
 
-На GPU-хосте Docker задаёт CPU/RAM limits, Kubernetes requests отсутствуют; VRAM каждой карты — 96 ГБ, отдельно от RAM хоста; резервный узел подхватывает задачу из checkpoint.
+На worker доступны 60 CPU / 240 ГиБ после резерва ОС/kubelet: **360 CPU / 1440 ГиБ на ДЦ**. Requests — до **203,5 CPU / 387 ГиБ**. После потери ДЦ API, projector/aggregator, DWHWriter, Indexer, media/RGW и mongos увеличиваются в 1,5 раза с округлением вверх; Envoy — до 45. CDC, Dataset API и Cron не масштабируются с внешним RPS. Итого **275,25 CPU / 530,5 ГиБ**, что помещается на 5 из 6 workers (300 CPU / 1200 ГиБ). Четыре Ingress pod — на разных узлах; CI имеет низкий приоритет.
 
-На worker оставляем 4 CPU / 16 ГиБ под ОС и kubelet: доступно **360 CPU / 1440 ГиБ на ДЦ**. Requests вместе с Ingress — до **178 CPU / 332 ГиБ** штатно. При потере ДЦ количество API, обработчиков и RGW увеличивается в 1,5 раза с округлением вверх, Envoy добавляется к новым API; Ingress остаётся 4. Итого до **243,25 CPU / 462,5 ГиБ** — помещается на 5 из 6 workers (300 CPU / 1200 ГиБ). Все четыре Ingress pod размещаются на разных узлах; доступ и playback получают приоритет, CI ограничивается квотами.
+На Rec-engine хосте BPR/CoListen + ContentANN + один CPU Job требуют 40 CPU / 352 ГиБ без системных агентов; CPU/RAM limits суммарно 56 / 480. BPR-факторы и co-listen занимают ~144 ГБ до ID-индексов: используются packed arrays/mmap, не списки Python-объектов. Квота CPU-batch допускает один тяжёлый Job на ДЦ. Обновление модели — по ДЦ без двойной загрузки большого движка, с fallback; очередь не закрепляет старую модель на 24 часа.
 
-Проектные цели на pod: Gateway — 5000 RPS, Playback — 2000, Catalog — 1000, остальные API — 500. После потери ДЦ 5 Gateway дают 25 тыс. RPS, 12 Playback — 24 тыс., 6 Catalog — 6 тыс.; это ориентиры sizing, а не измерения. Проверяются p95/p99, CPU, I/O и меж-ДЦ задержки. Логи после семплирования — до 100 ГБ/сутки, 7 суток; постоянные тома эксплуатации — на Ceph.
+GPU и Cassandra CDC работают вне Kubernetes: указаны Docker limits, requests отсутствуют. На GPU — 96 ГБ VRAM отдельно от RAM; резерв подхватывает checkpoint. mongos — по два роутера на ДЦ; по одному MongoDB config server размещено на трёх координаторах.
 
-VM на общих хостах (vCPU привязаны к физическим ядрам, без CPU/RAM overcommit):
+Проектные цели на pod: Gateway 5000 RPS, Event Ingest / Playback / Counters Read — 2000, Catalog — 1000, прочие API — 500. Это допущения до испытаний с внутренними вызовами, password hashing, p95/p99 и I/O. Постоянные тома эксплуатации — Ceph; логи после семплирования до 100 ГБ/сутки, 7 суток.
+
+VM на общих хостах; vCPU привязаны к физическим ядрам, без overcommit:
 
 |VM / сервис | VM на ДЦ | vCPU / RAM, ГиБ на VM | Диски / изоляция|
 |:--|--:|:--|:--|
-|PostgreSQL / Patroni / PgBouncer| 1| 32 / 256| свои 4×3,84 NVMe, RAID10|
-|MongoDB| 1| 32 / 256| свои 4×3,84 NVMe, RAID10|
+|MongoDB shard A replica| 1| 32 / 256| свои 4×3,84 NVMe, RAID10|
+|MongoDB shard B replica| 1| 32 / 256| свои 4×3,84 NVMe, RAID10|
 |Kafka broker| 2| 16 / 64| свои 4×3,84 NVMe, JBOD|
 |OpenSearch data node| 2| 16 / 128| свои 2×3,84 NVMe, RAID1|
 
-PG + Mongo занимают на одном хосте 64 из 80 CPU и 512 из 768 ГиБ; Kafka + OpenSearch — 32 из 48 CPU и 192 из 256 ГиБ. Остаток покрывает гипервизор и резерв. Реплики одной БД всегда на разных физических хостах/ДЦ; квоты CPU/RAM, отдельные диски и I/O-ограничения задаются через libvirt [^39]. При отказе общего хоста одновременно теряются экземпляры двух разных кластеров — проверяются оба failover.
+Две MongoDB VM занимают 64 из 80 CPU и 512 из 768 ГиБ; Kafka + OpenSearch — 32 из 48 CPU и 192 из 256 ГиБ. Остаток — гипервизор и резерв. Копии одного шарда всегда на разных физических хостах/ДЦ. libvirt задаёт CPU/RAM и I/O-лимиты [^39]; после отказа общего хоста проверяются оба затронутых кластера.
 
 ### 11.3. Месячная стоимость
 
@@ -841,9 +985,9 @@ PG + Mongo занимают на одном хосте 64 из 80 CPU и 512 и�
 
 ### 11.4. GPU для рекомендаций
 
-Это расчёт **упрощённого MVP с MF**, а не полной системы Яндекс Музыки: в публичном описании её команды упомянуты GPU-кластер, тысячи CPU и нейросетевое онлайн-ранжирование [^41]. У нас онлайн-выдача использует CPU и подготовленные кандидаты; GPU нужны для обучения.
+Это расчёт **упрощённого MVP с BPR-MF**, а не полной системы Яндекс Музыки: в публичном описании её команды упомянуты GPU-кластер, тысячи CPU и нейросетевое онлайн-ранжирование [^41]. У нас движки формируют кандидатов по запросу на CPU; GPU нужны для обучения BPR.
 
-**Память.** MF, 128 компонент FP32: (30,5 млн пользователей + 85 млн треков) × 128 × 4 = **59,14 ГБ параметров**. В одной карте 96 ГБ они помещаются, но это не доказывает достаточную скорость. Для нескольких GPU таблицы распределяются через TorchRec; 4×96 ГБ не являются одним автоматически общим буфером [^40]. Данные читаются батчами из DWH, SGD использует разреженные градиенты без momentum [^37].
+**Память.** BPR-MF, 128 компонент FP32: (30,5 млн пользователей + 85 млн треков) × 128 × 4 = **59,14 ГБ параметров**. В одной карте 96 ГБ они помещаются, но это не доказывает достаточную скорость. Для нескольких GPU таблицы распределяются через TorchRec; 4×96 ГБ не являются одним автоматически общим буфером [^40]. Данные читаются батчами из DWH, SGD использует разреженные градиенты без momentum [^37].
 
 **Окно обучения — проектное допущение:** ежедневно обучаем по 7 суткам прослушиваний, 3 эпохи, завершение за 8 часов. Объём — 186 млн × 7 × 3 = **3,906 млрд примеров**. Один пример — положительное взаимодействие с выбранным отрицательным; после фильтрации, семплирования или добавления реакций объём пересчитывается.
 
@@ -860,7 +1004,7 @@ PG + Mongo занимают на одном хосте 64 из 80 CPU и 512 и�
 
 Каждый GPU-хост: 64 vCPU / 1024 ГиБ RAM / 1×96 ГБ GPU / 2×3,84 ТБ NVMe / 10 Гбит/с; ориентир **230 тыс. ₽/мес**, предзаказ [^37], покупка — сметно **6 млн ₽**. Аренда пяти — **1,15 млн ₽/мес**, покупка — **30 млн ₽**; внутренняя сеть — ещё 100 тыс. ₽/мес по смете. HOSTKEY должен подтвердить пять совместимых узлов на одной площадке и гарантированную внутреннюю полосу. Синхронное обучение через публичные меж-ДЦ каналы не закладывается.
 
-TorchRec распределяет таблицы и вычисления по четырём GPU; пятый узел резервируется для перезапуска из checkpoint. Три CPU ML-узла сохранены для признаков/HNSW. При сбое обучения онлайн продолжает выдачу предыдущей модели. Резерв GPU нужен для свежести модели и восстановления задач, а не для обслуживания API. Число эпох, качество, q, η, peak VRAM и восстановление в заданное окно проверяются до фиксации закупки.
+TorchRec распределяет таблицы и вычисления по четырём GPU; пятый узел резервируется для перезапуска из checkpoint. Три Rec-engine узла обслуживают BPR/CoListen и ContentANN; отдельные CPU CronJob строят co-listen, CONTENT/HNSW и популярное. При сбое обучения онлайн продолжает выдачу предыдущей модели. Резерв GPU нужен для свежести модели и восстановления задач, а не для обслуживания API. Число эпох, качество, q, η, peak VRAM и восстановление в заданное окно проверяются до фиксации закупки.
 
 ### 11.5. Сравнение размещения
 
@@ -869,7 +1013,7 @@ TorchRec распределяет таблицы и вычисления по ч
 |Объединение | Раздельно, шт. / тыс. ₽·мес | Вместе, шт. / тыс. ₽·мес | Экономия, тыс. ₽/мес|
 |:--|:--|:--|--:|
 |Workers + Ingress| 27×32 CPU/128 ГиБ + 12×16 CPU/64 ГиБ; **39 / 1515**| 18×64 CPU/256 ГиБ; **18 / 1260**| 255|
-|PostgreSQL + MongoDB| 6×32 CPU/256 ГиБ; **6 / 390**| 3×80 CPU/768 ГиБ; **3 / 330**| 60|
+|Два MongoDB-шарда| 6×32 CPU/256 ГиБ; **6 / 390**| 3×80 CPU/768 ГиБ; **3 / 330**| 60|
 |Kafka + OpenSearch| 6×16 CPU/64 ГиБ + 6×16 CPU/128 ГиБ; **12 / 480**| 6×48 CPU/256 ГиБ; **6 / 390**| 90|
 |**Итого**| **57 / 2385**| **27 / 1980**| **405**|
 
@@ -881,9 +1025,9 @@ TorchRec распределяет таблицы и вычисления по ч
 |Раздельное размещение + 5 GPU-хостов| 158| 9,258| 15,070| 247,15|
 |**Совместное размещение + 5 GPU-хостов, бюджетный сценарий**| **128**| **8,853**| **14,584**| **237,55**|
 
-При одинаковом GPU совместное размещение уменьшает аренду на **405 тыс. ₽/мес (~4,86 млн ₽/год)**, бюджет с резервом — на **486 тыс. ₽/мес**, разовую покупку — сметно на **9,6 млн ₽**. Базовые ставки покупки для сравнения: workers 1,2; Ingress 0,7; PostgreSQL/MongoDB по 1,5; Kafka 0,9; OpenSearch 0,85 млн ₽/шт.
+При одинаковом GPU совместное размещение уменьшает аренду на **405 тыс. ₽/мес (~4,86 млн ₽/год)**, бюджет с резервом — на **486 тыс. ₽/мес**, разовую покупку — сметно на **9,6 млн ₽**. Базовые ставки покупки для сравнения: workers 1,2; Ingress 0,7; MongoDB shard VM-хосты по 1,5; Kafka 0,9; OpenSearch 0,85 млн ₽/шт.
 
-Экономия условна: укрупнённые хосты должны стоить не более ~84,2 тыс. ₽/мес для workers, 130 тыс. для PG+Mongo и 80 тыс. для Kafka+поиска. Цены 70/110/65 тыс. ₽ приняты для сметы и требуют КП. До переноса проверяются совместная нагрузка, p99, I/O, восстановление двух кластеров при отказе хоста и failover при потере ДЦ.
+Экономия условна: укрупнённые хосты должны стоить не более ~84,2 тыс. ₽/мес для workers, 130 тыс. для пары MongoDB shard VM и 80 тыс. для Kafka+поиска. Цены 70/110/65 тыс. ₽ приняты для сметы и требуют КП. До переноса проверяются совместная нагрузка, p99, I/O, восстановление двух кластеров при отказе хоста и failover при потере ДЦ.
 
 [^1]: [Аудитория «Яндекс Музыки» превысила 30,5 млн человек в месяц](https://www.sostav.ru/publication/auditoriya-yandeks-muzyki-prevysila-30-5-mln-chelovek-v-mesyats-79308.html)
 [^2]: [Число подписчиков Яндекс Плюса достигло 30 миллионов](https://yandex.ru/company/news/03-07-02-2024)
@@ -897,9 +1041,6 @@ TorchRec распределяет таблицы и вычисления по ч
 [^10]: [«Яндекс» построит новый дата-центр во Владимирской области](https://servernews.ru/1129768)
 [^11]: [What is Anycast? How does Anycast Work?](https://www.cloudflare.com/learning/cdn/glossary/anycast-network/) (Cloudflare Learning Center)
 [^12]: [Heroku's Ugly Secret](https://genius.com/James-somers-herokus-ugly-secret-annotated) (James Somers, разбор проблемы случайной маршрутизации запросов на Heroku)
-[^13]: [Maglev: A Fast and Reliable Software Network Load Balancer](https://research.google.com/pubs/pub44824.html) (Google)
-[^14]: [DPVS](https://github.com/iqiyi/dpvs) — high performance Layer-4 load balancer based on DPDK (open source)
-[^15]: [nfware — Virtual Load Balancer](https://nfware.com/virtual-load-balancer) (российская разработка сетевого балансировщика)
 [^16]: [Testing the Performance of NGINX and NGINX Plus Web Servers](https://blog.nginx.org/blog/testing-the-performance-of-nginx-and-nginx-plus-web-servers) (nginx, 2017, CPS для HTTPS-запросов)
 [^17]: [Testing the Performance of NGINX Ingress Controller for Kubernetes](https://blog.nginx.org/blog/testing-performance-nginx-ingress-controller-kubernetes) (nginx, 2019, TPS)
 [^18]: [Testing TLS Session Resumption](http://vincent.bernat.im/en/blog/2011-ssl-session-reuse-rfc5077.html) (Vincent Bernat, сбор статистики по использованию SSL session tickets через tcpdump)
@@ -910,14 +1051,13 @@ TorchRec распределяет таблицы и вычисления по ч
 [^23]: [hnswlib](https://github.com/nmslib/hnswlib) — инкрементальное построение HNSW; [Annoy](https://github.com/spotify/annoy) — статический индекс после build.
 [^24]: [OAuth 2.0, RFC 6749](https://www.rfc-editor.org/rfc/rfc6749), [JWT, RFC 7519](https://www.rfc-editor.org/rfc/rfc7519), [OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html) — разграничение авторизации, формата токена и аутентификации.
 [^25]: [Prometheus: Overview](https://prometheus.io/docs/introduction/overview/) — сбор метрик, визуализация и обработка оповещений.
-[^26]: [Redis Sentinel](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/) — высокая доступность Redis вне Redis Cluster.
+[^26]: [Redis Cluster](https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/) — hash slots, репликация, failover; отдельные логические БД Redis Cluster не поддерживает.
 
 [^27]: [Apache Kafka: Design](https://kafka.apache.org/design/) — порядок в партициях, транзакции и границы exactly-once при работе с внешними хранилищами.
 [^28]: [Apache Cassandra: Change Data Capture](https://cassandra.apache.org/doc/stable/cassandra/managing/operating/cdc.html) — чтение сохранённых мутаций, необходимость потребителя и ограничение CDC-пространства.
 [^29]: [OpenSearch: Text analysis](https://docs.opensearch.org/latest/analyzers/) — анализ текстовых полей и инвертированный индекс.
 
-[^30]: [Patroni: Replication modes](https://patroni.readthedocs.io/en/latest/replication_modes.html) — synchronous_mode, synchronous_mode_strict и выбор реплики.
-[^31]: [Redis Cluster specification](https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/) — асинхронная репликация и возможная потеря подтверждённых записей при failover.
+[^30]: [MongoDB: Replication](https://www.mongodb.com/docs/manual/replication/) — replica set, primary и выборы; в каждом шарде по одной копии на ДЦ.
 [^32]: [NETRACK: дата-центры](https://netrack.ru/data-centers), [аренда серверов](https://netrack.ru/dedicated) и [сетевая связность](https://netrack.ru/add-services/internet). Размещение на конкретных площадках и конфигурации согласуются до заказа.
 [^33]: [EdgeCenter: Bare Metal](https://edgecenter.ru/knowledge-base/cloud/about-bare-metal-severs) — Москва, Петербург, Екатеринбург и Новосибирск; индивидуальная комплектация и сеть — по согласованию.
 [^34]: [Selectel: выделенные серверы](https://selectel.ru/services/dedicated/) — площадка для независимого репозитория резервных копий в Петербурге.
@@ -929,3 +1069,9 @@ TorchRec распределяет таблицы и вычисления по ч
 
 [^40]: [TorchRec](https://meta-pytorch.org/torchrec/overview.html) — шардирование таблиц эмбеддингов и распределённое обучение; производительность зависит от плана размещения и межсоединения.
 [^41]: [Яндекс: ML-разработчик в Музыку](https://yandex.ru/jobs/vacancies/mlrazrabotchik-v-muziku-47406) — публичное описание команды: GPU-кластер, тысячи CPU и нейросетевое ранжирование; архивная вакансия не раскрывает точное количество оборудования.
+[^42]: [MongoDB TTL](https://www.mongodb.com/docs/manual/core/index-ttl/) — очистка просроченных документов выполняется фоново; Auth API проверяет срок и отзыв независимо от удаления. JWT/OIDC — источники [^24].
+[^43]: [MongoDB: atomicity](https://www.mongodb.com/docs/manual/core/write-operations-atomicity/), [shard keys](https://www.mongodb.com/docs/manual/core/sharding-shard-key/) и [document limit](https://www.mongodb.com/docs/manual/core/document/) — атомарность документа с expected revision, hashed sharding, предел BSON 16 MiB.
+[^44]: [Database per service](https://microservices.io/patterns/data/database-per-service.html) — приватные данные владельца, доступ через API; независимость схем не требует отдельной физической машины для каждой.
+[^45]: [BPR: Bayesian Personalized Ranking](https://arxiv.org/abs/1205.2618) — оптимизация персонального порядка по implicit feedback; в проекте выбран вариант матричной факторизации.
+[^46]: [TruncatedSVD](https://scikit-learn.org/stable/modules/generated/sklearn.decomposition.TruncatedSVD.html) и [TF-IDF](https://scikit-learn.org/stable/modules/generated/sklearn.feature_extraction.text.TfidfVectorizer.html) — контентный baseline по метаданным; качество и параметры проверяются отдельно.
+[^47]: [Cormack, Clarke, Büttcher: Reciprocal Rank Fusion](https://cormack.uwaterloo.ca/cormack/cormacksigir09-rrf.pdf) — объединение рангов; веса движков в проекте задаются FeedDefinition.
